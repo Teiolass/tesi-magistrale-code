@@ -1,7 +1,7 @@
 from time import sleep
 
 import os
-from typing import TypeVar
+from typing import TypeVar, Tuple
 import pandas as pd
 import numpy as np
 
@@ -60,9 +60,11 @@ class MimicData:
         self.encodings = encodings
     
 
-    def from_mimic(mimic: Mimic) -> _MimicData:
+    def from_mimic(mimic: Mimic, *, pad_visits=False, pad_codes=False) -> _MimicData:
         """
             Load and preprocess data from raw mimic files
+
+            WARNING: codes and encodings are shifted by 1 (code 0 means empy or invalid)
         """
         # load only the columns we are interest to
         diagnoses_cols  = ['SUBJECT_ID', 'HADM_ID', 'ICD9_CODE']
@@ -111,7 +113,7 @@ class MimicData:
             right_on = 'icd',
         )
         cat_codes = raw_codes.ccs.astype('category')
-        codes     = cat_codes.cat.codes
+        codes     = cat_codes.cat.codes + 1  
         encodings = cat_codes.cat.categories
         del raw_codes, cat_codes
 
@@ -135,19 +137,42 @@ class MimicData:
         patients = visits.groupby('SUBJECT_ID', sort=False).int_time.count().sort_index().reset_index()
         visits = visits.drop(columns='SUBJECT_ID')
 
-        # add 0 to beginning of patients and visits array and convert to numpy
-        buffer = np.empty((len(visits) + 1), dtype=np.int32)
-        buffer[1:] = visits[0].to_numpy(dtype=np.int32)
-        buffer[0] = 0
-        visits = buffer
-        np.cumsum(visits, out=visits)
-        buffer = np.empty((len(patients) + 1), dtype=np.int32)
-        buffer[1:] = patients.int_time.to_numpy()
-        buffer[0] = 0
-        patients = buffer
-        np.cumsum(patients, out=patients)
+        # convert to numpy and pad what must be padded
+        p_buffer = np.empty((len(patients) + 1), dtype=np.int32)
+        patients = patients.int_time.to_numpy()
+        p_buffer[1:] = patients
+        p_buffer[0] = 0
+        np.cumsum(p_buffer, out=p_buffer)
+
+        visits = visits[0].to_numpy(dtype=np.int32)
+
+        codes = codes.to_numpy(dtype=np.int32)
+        if pad_codes:
+            SIZE = 64
+            num_pads = SIZE - visits
+            pad = np.zeros(num_pads.sum(), dtype=codes.dtype)
+            pad_pos = np.repeat(np.cumsum(visits), num_pads)
+            codes = np.insert(codes, pad_pos, pad)
+            codes = codes.reshape((-1, SIZE))
+
+        if pad_visits:
+            SIZE = 64
+            num_pads = SIZE - patients
+            pad = np.zeros(num_pads.sum(), dtype=visits.dtype)
+            pad_pos = np.repeat(p_buffer[1:], num_pads)
+            visits = np.insert(visits, pad_pos, pad)
+            visits = visits.reshape((-1, SIZE))
+        else:
+            buffer = np.empty((len(visits) + 1), dtype=np.int32)
+            buffer[1:] = visits
+            buffer[0] = 0
+            visits = buffer
+            np.cumsum(visits, out=visits)
+
+        patients = p_buffer
+
         return MimicData (
-            codes     = codes.to_numpy(dtype=np.int32),
+            codes     = codes,
             visits    = visits,
             patients  = patients,
             encodings = encodings.to_numpy(),
@@ -233,75 +258,115 @@ class LinearModel(nn.Module):
     def __init__(self, *, n_embeddings: int):
         super(LinearModel, self).__init__()
         self.embedding_bag = nn.EmbeddingBag (
-            num_embeddings = n_embeddings,
-            embedding_dim  = n_embeddings,
-            mode = 'sum',
-            include_last_offset = True,
+            num_embeddings      = n_embeddings,
+            embedding_dim       = n_embeddings,
+            mode                = 'sum',
+            include_last_offset = False,
+            padding_idx         = 0,
         )
         self.n_embeddings = n_embeddings
 
-    def forward(self, codes: torch.Tensor, visits: torch.Tensor):
-        embeddings = self.embedding_bag(codes, offsets=visits)
+    def forward(self, codes: torch.Tensor):
+        embeddings = self.embedding_bag(codes)
         # predictions = torch.cumsum(embeddings, dim=0)
         return embeddings
 
-def train(model, optimizer: optim.Optimizer, data: MimicData, split: int, epochs: int, batch_size: int):
-    codes  = torch.from_numpy(data.codes).clone().to(device)
-    visits = torch.from_numpy(data.visits).clone().to(device)
+def train(
+    model     : LinearModel,
+    *,
+    optimizer : optim.Optimizer,
+    data      : MimicData,
+    split     : Tuple[int, int],
+    epochs    : int,
+):
+    codes = torch.tensor(data.codes, dtype=torch.int64, device=device)
     cross_entropy = nn.CrossEntropyLoss(reduction='mean')
-    multi_hot_weights = torch.eye(model.n_embeddings)        
-    multi_hot = torch.nn.EmbeddingBag (
-        num_embeddings = model.n_embeddings,
-        embedding_dim  = model.n_embeddings,
-        mode = 'sum',
-        include_last_offset = True,
-        _weight = multi_hot_weights,
-    ).to(device)
+    encoder_weights = torch.eye(model.n_embeddings, device=device)
+    encoder_weights[0,0] = 0
+    target_encoder = nn.EmbeddingBag (
+        num_embeddings      = model.n_embeddings,
+        embedding_dim       = model.n_embeddings,
+        mode                = 'sum',
+        include_last_offset = False,
+        device              = device,
+        _weight             = encoder_weights,
+    )
+    num_batches = split[1] - split[0]
 
-    patient_start = 0
-    for i in range(split):
-        patient_end = data.patients[i+1]
-        p_visits    = visits[patient_start:patient_end]
-        p_codes     = codes[p_visits[0]:]
-        p_visits    = p_visits - p_visits[0]
-        predictions = model(p_codes, p_visits)
+    for epoch in range(epochs):
+        cursor = data.patients[split[0]]
+        train_loss = 0
+        for p in range(split[0]+1, split[1]):
+            optimizer.zero_grad()
+            
+            new_cursor = data.patients[p]
+            prediction_cats = codes[cursor:new_cursor-1]
+            predictions = model(prediction_cats)
 
-        t_visits = visits[patient_start+1:patient_end+1]
-        t_codes  = codes[t_visits[0]:]
-        t_visits = t_visits - t_visits[0]
-        targets  = multi_hot(t_codes, t_visits)
+            targets_cat = codes[cursor+1: new_cursor]
+            targets = target_encoder(targets_cat)
+            loss = cross_entropy(predictions, targets)
+            train_loss += loss
 
-        loss = cross_entropy(predictions, targets)
+            loss.backward()
+            optimizer.step()
 
-        loss.backward()
-        optimizer.step()
-        
-        patient_start = patient_end
+            cursor = new_cursor
+        print(f'epoch {epoch} done with loss {train_loss/num_batches}')
 
-        
+def test(
+    model: LinearModel,
+    data: MimicData,
+    split: Tuple[int, int]
+) -> float:
+    codes = torch.tensor(data.codes, dtype=torch.int64, device=device)
+    cross_entropy = nn.CrossEntropyLoss(reduction='mean')
+    encoder_weights = torch.eye(model.n_embeddings, device=device)
+    encoder_weights[0,0] = 0
+    target_encoder = nn.EmbeddingBag (
+        num_embeddings      = model.n_embeddings,
+        embedding_dim       = model.n_embeddings,
+        mode                = 'sum',
+        include_last_offset = False,
+        device              = device,
+        _weight             = encoder_weights,
+    )
+    num_batches = split[1] - split[0]
 
+    total_loss = 0
+    cursor = data.patients[split[0]]
+    for p in range(split[0]+1, split[1]):
+        new_cursor = data.patients[p]
+        prediction_cats = codes[cursor:new_cursor-1]
+        predictions = model(prediction_cats)
+
+        with torch.no_grad():
+            targets_cat = codes[cursor+1: new_cursor]
+            targets = target_encoder(targets_cat)
+            loss = cross_entropy(predictions, targets)
+            train_loss += loss
+        cursor = new_cursor
+
+    return total_loss / num_batches
     
 
 if __name__ == '__main__':
     # these paths are relevant for the cnr machine only
     mimic = Mimic.from_folder('/home/amarchetti/mimic-iii', '/home/amarchetti')
-    data = MimicData.from_mimic(mimic)
-
-    # model = DraiModel(
-    #     hidden_size  = 512,
-    #     n_embeddings = data.encodings.size,
-    #     n_layers     = 2,
-    #     dropout      = 0.7,
-    # ).to(device)
-
-    # optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    # model.train(optimizer, data, 6000, 1)
+    data = MimicData.from_mimic(mimic, pad_visits=False, pad_codes=True)
+    print('data loaded')
 
     model = LinearModel (
-        n_embeddings = data.encodings.size,
+        n_embeddings = data.encodings.size + 1,
     ).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-2)
-    train(model, optimizer, data, 500, 1, 3)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    train(
+        model     = model,
+        optimizer = optimizer,
+        data      = data,
+        split     = (0, 400),
+        epochs    = 1000,
+    )
     print('ok')
     
 
