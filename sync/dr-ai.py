@@ -11,7 +11,7 @@ from   torch.linalg import vecdot
 
 from mimic_loader import *
 
-device = 'cpu'
+device = 'cuda'
 
 class DraiModel(nn.Module):
     embedding : nn.Module
@@ -57,13 +57,17 @@ class DraiModel(nn.Module):
         return output
 
 
+# @todo some things that should be arguments of the function are just
+# hardcoded in the first paragraph in its body. 
 def train(model, data):
-    loss_function = nn.CrossEntropyLoss(reduction='sum', ignore_index=0)
-    optimizer     = optim.Adam(model.parameters(), lr=1e-2)
+    train_ratio   = .7
+    batch_size    = 16
+    epochs        = 6000
+    patience      = 10
+    learning_rate = 2e-3
 
-    train_ratio = .7
-    batch_size  = 5
-    epochs      = 300
+    loss_function = nn.CrossEntropyLoss(reduction='sum', ignore_index=0)
+    optimizer     = optim.Adam(model.parameters(), lr=learning_rate)
 
     patients = []
     for i in range(len(data.patients) - 1):
@@ -83,6 +87,9 @@ def train(model, data):
 
     print('starting train loop...\n')
     starting_time = dt.datetime.now()
+
+    last_test_loss = 100000
+    patience_count  = 0
 
     for epoch in range(epochs):
         train_loss = 0
@@ -111,6 +118,14 @@ def train(model, data):
         test_loss, recalls = evaluate(model, test_patients, loss_function)
         train_loss = float(train_loss / num_loss)
 
+        if test_loss > last_test_loss:
+            patience_count += 1
+        else:
+            patience_count = 0
+        if patience_count > patience:
+            print('exiting train loop because we run out of patience')
+            break
+
         now = dt.datetime.now()
         elapsed = (now - starting_time).total_seconds()
         total_time   = format_seconds(elapsed)
@@ -121,7 +136,8 @@ def train(model, data):
         for p, r in zip(recall_params, recalls):
             print(f'recall@{p}: {100*r:<4.1f}%    ', end='')
         print('')
-        print(f'total time: {total_time:10<} average epoch time {average_time}')
+        print(f'    ', end='')
+        print(f'total time: {total_time:<10} average epoch time {average_time}')
         
 def format_seconds(seconds: float) -> str:
     if seconds < 100:
@@ -174,8 +190,19 @@ if __name__ == '__main__':
     if not 'mimic' in globals() or not 'data' in globals():
         print('it seems that the variables `mimic` and `data` are not defined in the global namespace')
         print('I`m going to create them')
-        mimic = Mimic.from_folder('/home/amarchetti/mimic-iii', '/home/amarchetti')
+        mimic = Mimic.from_folder('/home/amarchetti/data/mimic-iii', '/home/amarchetti/data')
         data  = MimicData.from_mimic(mimic, pad_visits=False, pad_codes=True)
+        # data.codes in a [n,64] shaped numpy array, where n is the total number of visits
+        #
+        # For each i in range(n), data[i,:] is a vector of non-zero diagnoses codes padded with zero codes
+
+        # data.patients is an [m] shaped numpy array of codes, where m-1 is the number of patients
+        #
+        # data.patients[0] is always 0
+        #
+        # for each i in range(m-1), the visits in data.codes at indexes in
+        # range(data.patients[i], data.patients[i+1]) are the visits corrseponding to
+        # the i-th patient
         print('data loaded')
     else:
         print('I have found the variables `mimic` and `data` in the global namespace')
@@ -185,10 +212,10 @@ if __name__ == '__main__':
     n_codes = data.get_num_codes()
 
     drai = DraiModel (
-        hidden_size = 1024,
+        hidden_size = 128,
         n_codes     = n_codes,
         n_layers    = 2,
-        dropout     = 0.6,
+        dropout     = 0.5,
     ).to(device)
 
     train(drai, data)
