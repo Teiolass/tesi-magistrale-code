@@ -61,7 +61,7 @@ class DraiModel(nn.Module):
 # hardcoded in the first paragraph in its body. 
 def train(model, data):
     train_ratio   = .7
-    batch_size    = 16
+    batch_size    = 20
     epochs        = 6000
     patience      = 10
     learning_rate = 2e-3
@@ -80,16 +80,30 @@ def train(model, data):
     num_train = int(len(patients) * train_ratio)
     num_test  = len(patients) - num_train
 
-    train_patients = patients[:num_train]
+    train_patients = patients[num_train-20:num_train]
     test_patients  = patients[num_train:]
 
-    num_batches = int((len(train_patients)-1) / batch_size)
+    num_batches = int((len(train_patients)) / batch_size)
 
     print('starting train loop...\n')
     starting_time = dt.datetime.now()
 
     last_test_loss = 100000
-    patience_count  = 0
+    patience_count = 0
+
+
+    test_loss, recalls = evaluate(model, test_patients, loss_function)
+    now = dt.datetime.now()
+    elapsed = (now - starting_time).total_seconds()
+    total_time   = format_seconds(elapsed)
+    print(f'random init. Test loss is {test_loss:<8.3f}')
+    print(f'    ', end='')
+    for p, r in zip(recall_params, recalls):
+        print(f'recall@{p}: {100*r:<4.1f}%    ', end='')
+    print('')
+    print(f'    ', end='')
+    print(f'total time: {total_time:<10}')
+    
 
     for epoch in range(epochs):
         train_loss = 0
@@ -212,7 +226,7 @@ if __name__ == '__main__':
     n_codes = data.get_num_codes()
 
     drai = DraiModel (
-        hidden_size = 128,
+        hidden_size = 2000,
         n_codes     = n_codes,
         n_layers    = 2,
         dropout     = 0.5,
