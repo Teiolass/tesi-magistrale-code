@@ -63,11 +63,12 @@ def train(model, data):
     train_ratio   = .7
     batch_size    = 20
     epochs        = 6000
-    patience      = 10
-    learning_rate = 2e-3
+    patience      = 30
+    learning_rate = 3e-5
+    l2_penalty    = 1e-1
 
     loss_function = nn.CrossEntropyLoss(reduction='sum', ignore_index=0)
-    optimizer     = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer     = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_penalty)
 
     patients = []
     for i in range(len(data.patients) - 1):
@@ -88,7 +89,7 @@ def train(model, data):
     print('starting train loop...\n')
     starting_time = dt.datetime.now()
 
-    last_test_loss = 100000
+    min_test_loss = 100000
     patience_count = 0
 
 
@@ -103,7 +104,8 @@ def train(model, data):
     print('')
     print(f'    ', end='')
     print(f'total time: {total_time:<10}')
-    
+
+    history = []    
 
     for epoch in range(epochs):
         train_loss = 0
@@ -132,10 +134,12 @@ def train(model, data):
         test_loss, recalls = evaluate(model, test_patients, loss_function)
         train_loss = float(train_loss / num_loss)
 
-        if test_loss > last_test_loss:
+        if test_loss > min_test_loss:
             patience_count += 1
+            print(f'    ** patience grr: {patience_count}/{patience}')
         else:
             patience_count = 0
+        min_test_loss = min(min_test_loss, test_loss)
         if patience_count > patience:
             print('exiting train loop because we run out of patience')
             break
@@ -152,6 +156,13 @@ def train(model, data):
         print('')
         print(f'    ', end='')
         print(f'total time: {total_time:<10} average epoch time {average_time}')
+
+        record = {}
+        record['train_loss'] = float(train_loss)
+        record['test_loss'] = float(test_loss)
+        record['recalls'] = [float(v) for v in recalls]
+        history.append(record)
+    return history
         
 def format_seconds(seconds: float) -> str:
     if seconds < 100:
@@ -190,7 +201,7 @@ def evaluate(model: DraiModel, data: List[torch.Tensor], loss_function):
             for i, k in enumerate(recall_params):
                 topk = pred.topk(k, dim=1).indices
                 top_pred    = F.one_hot(topk, model.n_codes)[:,:,1:].sum(1).type(torch.HalfTensor)
-                one_hot_out = F.one_hot(out, model.n_codes )[:,:,1:].sum(1).type(torch.HalfTensor)
+                one_hot_out = F.one_hot(out , model.n_codes)[:,:,1:].sum(1).type(torch.HalfTensor)
                 recalls       = vecdot(top_pred, one_hot_out)
                 normalization = one_hot_out.sum(1)
                 total_recall[i] += torch.div(recalls, normalization).sum()
@@ -226,12 +237,12 @@ if __name__ == '__main__':
     n_codes = data.get_num_codes()
 
     drai = DraiModel (
-        hidden_size = 2000,
+        hidden_size = 4096,
         n_codes     = n_codes,
         n_layers    = 2,
-        dropout     = 0.5,
+        dropout     = 0.8,
     ).to(device)
 
-    train(drai, data)
+    history = train(drai, data)
     
 
