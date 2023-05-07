@@ -61,11 +61,11 @@ class DraiModel(nn.Module):
 # hardcoded in the first paragraph in its body. 
 def train(model, data):
     train_ratio   = .7
-    batch_size    = 20
+    batch_size    = 24
     epochs        = 6000
-    patience      = 30
-    learning_rate = 3e-5
-    l2_penalty    = 1e-1
+    patience      = 100
+    learning_rate = 2e-5
+    l2_penalty    = 1e-2
 
     loss_function = nn.CrossEntropyLoss(reduction='sum', ignore_index=0)
     optimizer     = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_penalty)
@@ -81,7 +81,7 @@ def train(model, data):
     num_train = int(len(patients) * train_ratio)
     num_test  = len(patients) - num_train
 
-    train_patients = patients[num_train-20:num_train]
+    train_patients = patients[:num_train]
     test_patients  = patients[num_train:]
 
     num_batches = int((len(train_patients)) / batch_size)
@@ -140,7 +140,7 @@ def train(model, data):
         else:
             patience_count = 0
         min_test_loss = min(min_test_loss, test_loss)
-        if patience_count > patience:
+        if patience_count >= patience:
             print('exiting train loop because we run out of patience')
             break
 
@@ -152,7 +152,7 @@ def train(model, data):
         print(f'epoch {epoch:<3}. Test loss is {test_loss:<8.3f}. Train loss is {train_loss:<8.3f}')
         print(f'    ', end='')
         for p, r in zip(recall_params, recalls):
-            print(f'recall@{p}: {100*r:<4.1f}%    ', end='')
+            print(f'recall@{p}: {100*r:<4.2f}%    ', end='')
         print('')
         print(f'    ', end='')
         print(f'total time: {total_time:<10} average epoch time {average_time}')
@@ -237,12 +237,19 @@ if __name__ == '__main__':
     n_codes = data.get_num_codes()
 
     drai = DraiModel (
-        hidden_size = 4096,
+        hidden_size = 2048,
         n_codes     = n_codes,
         n_layers    = 2,
-        dropout     = 0.8,
+        dropout     = 0.95,
     ).to(device)
 
     history = train(drai, data)
     
+    ltrain = [v['train_loss'] for v in history]
+    ltest  = [v['test_loss' ] for v in history]
 
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(16, 9))
+    plt.plot(range(len(ltrain)), ltrain)
+    plt.plot(range(len(ltest )), ltest )
+    plt.show()
