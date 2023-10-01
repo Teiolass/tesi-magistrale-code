@@ -3,13 +3,17 @@ from polars import col
 
 import os
 
-mimic_prefix = 'data/mimic-iv/2.2/hosp/'
-ccs_prefix   = 'data/ccs'
+mimic_prefix  = 'data/mimic-iv/2.2/hosp/'
+ccs_prefix    = 'data/ccs'
+output_prefix = 'data/processed'
 
 diagnoses_file  = 'diagnoses_icd.csv.gz'
 admissions_file = 'admissions.csv.gz'
 ccs_single_file = 'ccs_single_dx_tool_2015.csv'
 icd_conv_file   = 'icd10cmtoicd9gem.csv'
+
+output_diagnoses = 'diagnoses.parquet'
+output_codes     = 'codes.parquet'
 
 diagnoses_path = os.path.join(mimic_prefix, diagnoses_file)
 diagnoses      = pl.read_csv(diagnoses_path)
@@ -20,6 +24,7 @@ icd_conv       = pl.read_csv(icd_conv_path, dtypes={'icd10cm':pl.Utf8, 'icd9cm':
 ccs_conv_path  = os.path.join(ccs_prefix, ccs_single_file)
 ccs_conv       = pl.read_csv(ccs_conv_path, quote_char="'")
 
+pl.set_random_seed(42)
 
 diagnoses = diagnoses[['subject_id', 'hadm_id', 'icd_code', 'icd_version']]
 diagnoses = diagnoses.with_columns (
@@ -68,13 +73,30 @@ starting_index = 0 if we_have_zero_code else 1
 indexes = pl.DataFrame({'code_id': range(starting_index, starting_index+ccs_codes.shape[0])})
 ccs_codes = pl.concat([ccs_codes, indexes], how='horizontal')
 
-diagnoses = diagnoses.join(ccs_codes[['ccs', 'code_id']], on='ccs', how='left').drop('ccs')
-diagnoses = diagnoses.group_by(col('*').exclude('code_id')).agg(col('code_id').alias('code_ids'))
-
 admissions = admissions.select (
     col('hadm_id'),
     col('admittime').str.to_datetime('%Y-%m-%d %H:%M:%S')
 )
 diagnoses = diagnoses.join(admissions, on='hadm_id', how='left')
+diagnoses = diagnoses.join(ccs_codes[['ccs', 'code_id']], on='ccs', how='left').drop('ccs')
 
-diagnoses = diagnoses.group_by('subject_id').agg(col('code_ids').sort_by('admittime'))
+diagnoses_a = (
+    diagnoses
+    .with_columns(
+        position = col('admittime').rank('dense').over('subject_id'),
+    )
+    .group_by('subject_id')
+    .agg(
+        col(['code_id', 'position']).sort_by('admittime'),
+    )
+)
+diagnoses_b = (
+    diagnoses
+    .group_by(['hadm_id', 'subject_id', 'admittime'])
+    .agg(pl.count())
+    .group_by('subject_id')
+    .agg(col('count').sort_by('admittime'))
+)
+diagnoses = diagnoses_a.join(diagnoses_b, on='subject_id', how='inner')
+
+
