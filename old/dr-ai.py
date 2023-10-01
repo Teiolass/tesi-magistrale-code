@@ -1,13 +1,21 @@
 import datetime as dt
+import os
 from typing import TypeVar, Tuple, List
+from functools import partial
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 import torch
 from   torch import nn, optim
 import torch.nn.functional as F
 from   torch.nn.utils.rnn import *
 from   torch.linalg import vecdot
+
+import ray
+from ray import tune
+from hyperopt import hp
+from ray.tune.search.hyperopt import HyperOptSearch
 
 from mimic_loader import *
 
@@ -56,69 +64,52 @@ class DraiModel(nn.Module):
         output = [self.output(t) for t in output]
         return output
 
+@dataclass(kw_only=True)
+class TrainableData:
+    train_patients: np.ndarray
+    valid_patients: np.ndarray
+    n_codes: int
 
-# @todo some things that should be arguments of the function are just
-# hardcoded in the first paragraph in its body. 
-def train(model, data):
-    train_ratio   = .7
-    batch_size    = 24
-    epochs        = 6000
-    patience      = 100
-    learning_rate = 2e-5
-    l2_penalty    = 1e-2
+def train_model(config, data: TrainableData):
+    batch_size    = config['batch_size']
+    learning_rate = config['learning_rate']
+    l2_penalty    = config['l2_penalty']
+    hidden_size   = config['hidden_size']
+    n_layers      = config['n_layers']
+    dropout       = config['dropout']
+
+    epochs        = 1000
+    n_codes        = data.n_codes
+    train_patients = data.train_patients
+    valid_patients = data.valid_patients
+
+    drai = DraiModel (
+        hidden_size = hidden_size,
+        n_codes     = n_codes,
+        n_layers    = n_layers,
+        dropout     = dropout,
+    ).to(device)
+    drai.eval()
+
 
     loss_function = nn.CrossEntropyLoss(reduction='sum', ignore_index=0)
-    optimizer     = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=l2_penalty)
-
-    patients = []
-    for i in range(len(data.patients) - 1):
-        start = data.patients[i]
-        end   = data.patients[i+1]
-        codes_per_patient = data.codes[start:end]
-        tensor = torch.tensor(codes_per_patient, dtype=torch.int64, device=device)
-        patients.append(tensor)
-
-    num_train = int(len(patients) * train_ratio)
-    num_test  = len(patients) - num_train
-
-    train_patients = patients[:num_train]
-    test_patients  = patients[num_train:]
+    optimizer     = optim.Adam(drai.parameters(), lr=learning_rate, weight_decay=l2_penalty)
 
     num_batches = int((len(train_patients)) / batch_size)
-
-    print('starting train loop...\n')
-    starting_time = dt.datetime.now()
-
-    min_test_loss = 100000
-    patience_count = 0
-
-
-    test_loss, recalls = evaluate(model, test_patients, loss_function)
-    now = dt.datetime.now()
-    elapsed = (now - starting_time).total_seconds()
-    total_time   = format_seconds(elapsed)
-    print(f'random init. Test loss is {test_loss:<8.3f}')
-    print(f'    ', end='')
-    for p, r in zip(recall_params, recalls):
-        print(f'recall@{p}: {100*r:<4.1f}%    ', end='')
-    print('')
-    print(f'    ', end='')
-    print(f'total time: {total_time:<10}')
-
-    history = []    
-
     for epoch in range(epochs):
         train_loss = 0
         num_loss   = 0
+
+        drai.train()
         for batch_i in range(num_batches):
             start = batch_i * batch_size
             end   = start + batch_size
-            batch = sorted(patients[start:end], key = lambda t: len(t), reverse=True)
+            batch = sorted(train_patients[start:end], key = lambda t: len(t), reverse=True)
             batch_in  = [t[:-1] for t in batch]
             batch_out = [t[1: ] for t in batch]
 
             optimizer.zero_grad()
-            predictions = model(batch_in)
+            predictions = drai(batch_in)
 
             losses = []
             for pred, out in zip(predictions, batch_out):
@@ -130,39 +121,18 @@ def train(model, data):
             loss.backward()
             train_loss += loss
             optimizer.step()
+        drai.eval()
 
-        test_loss, recalls = evaluate(model, test_patients, loss_function)
+        valid_loss, recalls = evaluate(drai, valid_patients, loss_function)
         train_loss = float(train_loss / num_loss)
-
-        if test_loss > min_test_loss:
-            patience_count += 1
-            print(f'    ** patience grr: {patience_count}/{patience}')
-        else:
-            patience_count = 0
-        min_test_loss = min(min_test_loss, test_loss)
-        if patience_count >= patience:
-            print('exiting train loop because we run out of patience')
-            break
-
-        now = dt.datetime.now()
-        elapsed = (now - starting_time).total_seconds()
-        total_time   = format_seconds(elapsed)
-        average_time = format_seconds(elapsed / (epoch+1))
-        
-        print(f'epoch {epoch:<3}. Test loss is {test_loss:<8.3f}. Train loss is {train_loss:<8.3f}')
-        print(f'    ', end='')
-        for p, r in zip(recall_params, recalls):
-            print(f'recall@{p}: {100*r:<4.2f}%    ', end='')
-        print('')
-        print(f'    ', end='')
-        print(f'total time: {total_time:<10} average epoch time {average_time}')
-
         record = {}
         record['train_loss'] = float(train_loss)
-        record['test_loss'] = float(test_loss)
-        record['recalls'] = [float(v) for v in recalls]
-        history.append(record)
-    return history
+        record['valid_loss'] = float(valid_loss)
+        for k, v in zip(recall_params, recalls):
+            field = f'recall_{k}'
+            record[field] = float(v)
+
+        tune.report(**record)
         
 def format_seconds(seconds: float) -> str:
     if seconds < 100:
@@ -234,22 +204,77 @@ if __name__ == '__main__':
         print('I think there is no need to recompute them')
     print()
 
-    n_codes = data.get_num_codes()
+    train_ratio   = .7
+    patients = []
+    for i in range(len(data.patients) - 1):
+        start = data.patients[i]
+        end   = data.patients[i+1]
+        codes_per_patient = data.codes[start:end]
+        tensor = torch.tensor(codes_per_patient, dtype=torch.int64, device=device)
+        patients.append(tensor)
+    num_train = int(len(patients) * train_ratio)
+    num_valid = len(patients) - num_train
+    train_patients = patients[:num_train]
+    valid_patients = patients[num_train:]
+    trainable_data = TrainableData (
+        train_patients = train_patients,
+        valid_patients = valid_patients,
+        n_codes        = data.get_num_codes()
+    )
 
-    drai = DraiModel (
-        hidden_size = 2048,
-        n_codes     = n_codes,
-        n_layers    = 2,
-        dropout     = 0.95,
-    ).to(device)
+    space = {
+        'batch_size'    : hp.choice('batch_size', [1,2,4,8,16,24,32,64]),
+        'learning_rate' : hp.loguniform('learning_rate', -10, 0),
+        'l2_penalty'    : hp.loguniform('l2_penalty', -4, 2),
+        'hidden_size'   : hp.choice('hidden_size', [2**k for k in range(5, 12)]),
+        'n_layers'      : hp.choice('n_layers', [1,2,3,4,5]),
+        'dropout'       : hp.uniform('dropout', 0, 1),
+    }
 
-    history = train(drai, data)
-    
-    ltrain = [v['train_loss'] for v in history]
-    ltest  = [v['test_loss' ] for v in history]
+    initial_parameters = [{
+        'batch_size'    : 24,
+        'learning_rate' : 5e-3,
+        'l2_penalty'    : 5e-2,
+        'hidden_size'   : 2048,
+        'n_layers'      : 2,
+        'dropout'       : 0.9,
+    }]
 
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(16, 9))
-    plt.plot(range(len(ltrain)), ltrain)
-    plt.plot(range(len(ltest )), ltest )
-    plt.show()
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init()
+
+    scheduler = tune.schedulers.ASHAScheduler (
+        max_t            = 800,
+        grace_period     = 15,
+        reduction_factor = 3,
+        metric = 'valid_loss',
+        mode   = 'min',
+    )
+    hyperopt_search = HyperOptSearch (
+        space,
+        metric = 'valid_loss',
+        mode   = 'min',
+        points_to_evaluate = initial_parameters,
+    )
+    tuner = tune.Tuner (
+        tune.with_resources(
+            tune.with_parameters(train_model, data=trainable_data),
+            resources = {'cpu': 1, 'gpu': 1},
+        ),
+        tune_config = tune.TuneConfig (
+            num_samples = 100,
+            search_alg  = hyperopt_search,
+            scheduler   = scheduler,
+        ),
+    )
+    results = tuner.fit()
+
+    print('\n\n ======== FINAL RESULTS =======\n')
+    best_result = results.get_best_result('valid_loss', 'min')
+    print("Best trial config: {}".format(best_trial.config))
+    print("Best trial train loss: {:.4f}".format(best_result.metrics['train_loss']))
+    print("Best trial valid loss: {:.4f}".format(best_result.metrics['valid_loss']))
+    print("Best trial recall_10: {:.2f}%".format(best_result.metrics['recall_10'] * 100))
+    print("Best trial recall_20: {:.2f}%".format(best_result.metrics['recall_20'] * 100))
+    print("Best trial recall_30: {:.2f}%".format(best_result.metrics['recall_30'] * 100))

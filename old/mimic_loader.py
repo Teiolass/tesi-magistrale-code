@@ -16,8 +16,8 @@ class Mimic:
     admissions : str
     ccs_convert: str
 
-    DEFAULT_DIAGNOSES   = 'DIAGNOSES_ICD.csv.gz'
-    DEFAULT_ADMISSIONS  = 'ADMISSIONS.csv.gz'
+    DEFAULT_DIAGNOSES   = 'DIAGNOSES_ICD.csv'
+    DEFAULT_ADMISSIONS  = 'ADMISSIONS.csv'
     DEFAULT_CCS_CONVERT = 'dxicd2ccsxw.csv'
 
     def from_folder(folder: str, ccs_convert: str) -> Self:
@@ -163,7 +163,7 @@ if __name__ == '__main__':
     if not 'mimic' in globals() or not 'data' in globals():
         print('it seems that the variables `mimic` and `data` are not defined in the global namespace')
         print('I`m going to create them')
-        mimic = Mimic.from_folder('/home/amarchetti/mimic-iii', '/home/amarchetti')
+        mimic = Mimic.from_folder('/home/amarchetti/data/mimic-iii', '/home/amarchetti/data')
         data  = MimicData.from_mimic(mimic, pad_visits=False, pad_codes=True)
         print('data loaded')
     else:
