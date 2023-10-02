@@ -99,4 +99,6 @@ diagnoses_b = (
 )
 diagnoses = diagnoses_a.join(diagnoses_b, on='subject_id', how='inner')
 
+diagnoses.write_parquet(os.path.join(output_prefix, output_diagnoses))
+ccs_codes.write_parquet(os.path.join(output_prefix, output_codes))
 
