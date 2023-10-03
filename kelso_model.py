@@ -20,6 +20,7 @@ class Kelso_Config:
     head_dim:    int
     pos_base:    float
     device:      str
+    mlp_intermediate_size: int
 
 # See this [article](http://arxiv.org/abs/2104.09864)
 class Rotary_Embedding:
@@ -55,6 +56,17 @@ class Rotary_Embedding:
         sin_f = self.sin_buffer[positions].unsqueeze(1)
         return batch*cos_f + rotated*sin_f
 
+class Kelso_MLP(nn.Module):
+    def __init__(self, hidden_size: int, intermediate_size: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj   = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.act_fn    = F.silu
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
 
 
 class Kelso_Model(nn.Module):
@@ -67,6 +79,7 @@ class Kelso_Model(nn.Module):
             device = 'cpu', # @bug this is wrong!
         )
         self.decoder_layers = nn.ModuleList([Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]) 
+        self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
 
     def forward(self, batch: torch.Tensor, positions: torch.LongTensor, lengths: torch.LongTensor):
         # batch, position size is (bsz, b_n)  
@@ -96,10 +109,9 @@ class Kelso_Model(nn.Module):
         decoder_mask = torch.full((b_n, b_n), torch.finfo(torch.float).min, device=config.device)
         decoder_mask = torch.triu(decoder_mask, diagonal=1)
 
-        lengths = lengths.view((-1, 1))
         filter   = torch.arange(b_n, device=config.device).view((1, -1))
         pad_mask = torch.full((bsz, b_n), torch.finfo(torch.float).min, device=config.device)
-        pad_mask = pad_mask.masked_fill_(filter < lengths, 0)
+        pad_mask = pad_mask.masked_fill_(filter < lengths.view((-1, 1)), 0)
 
         decoder_mask = decoder_mask[None, None, :, :]
         pad_mask = pad_mask[:, None, None, :]
@@ -117,7 +129,15 @@ class Kelso_Model(nn.Module):
 
         # PHASE 3: transformer
 
-        _ = self.decoder_layers[0](embeddings, positions, mask)
+        batch = embeddings
+        for layer in self.decoder_layers:
+            batch = layer(batch, positions, mask) 
+
+        # PHASE 4: extract output
+        output = self.head(batch)
+        return output
+
+
 
 class Kelso_Attention(nn.Module):
     def __init__(self, config: Kelso_Config, rotary_embedding: Rotary_Embedding):
@@ -183,10 +203,20 @@ class Kelso_Decoder_Layer(nn.Module):
     def __init__(self, config: Kelso_Config, rotary_embedding: Rotary_Embedding):
         super().__init__()
         self.attention = Kelso_Attention(config, rotary_embedding)
-
+        self.mlp = Kelso_MLP(config.hidden_size, config.mlp_intermediate_size)
+        self.normalization_pre  = nn.LayerNorm(config.hidden_size)
+        self.normalization_post = nn.LayerNorm(config.hidden_size)
     
     def forward(self, batch: torch.Tensor, positions: torch.LongTensor, mask: torch.Tensor):
-        self.attention(batch, positions, mask)
+        residual = batch
+        batch = self.normalization_pre(batch)
+        batch = self.attention(batch, positions, mask)
+        batch = batch + residual
+        residual = batch
+        batch = self.normalization_post(batch)
+        batch = self.mlp(batch)
+        batch = batch + residual
+        return batch
 
 
 if __name__ == '__main__':
@@ -202,6 +232,7 @@ if __name__ == '__main__':
         head_dim    = 128,
         pos_base    = 10_000,
         device      = 'cpu',
+        mlp_intermediate_size = 1024,
     )
 
     model = Kelso_Model(config)
