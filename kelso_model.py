@@ -2,6 +2,7 @@ import polars as pl
 import numpy as np
 
 import math
+from typing import List
 
 import torch
 from torch import nn
@@ -82,7 +83,12 @@ class Kelso_Model(nn.Module):
         self.decoder_layers = nn.ModuleList([Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]) 
         self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
 
-    def forward(self, batch: torch.Tensor, positions: torch.LongTensor, lengths: torch.LongTensor):
+    def forward(
+        self,
+        batch:     torch.Tensor,
+        positions: torch.LongTensor,
+        lengths:   torch.LongTensor,
+    ) -> List[torch.Tensor]:
         # batch, position size is (bsz, b_n)  
         if batch.shape != positions.shape:
             raise ValueError(
@@ -136,7 +142,22 @@ class Kelso_Model(nn.Module):
 
         # PHASE 4: extract output
         output = self.head(batch)
-        return output
+        output.masked_fill_(positions.unsqueeze(2) == -1, 0)
+        v_s = positions.max(-1).values + 1
+        
+        predictions = []
+        for it in range(bsz):
+            t = torch.zeros((v_s[it], output.shape[-1]))
+            c = torch.zeros((v_s[it],))
+            ids = positions[it].clamp(0)
+            t.index_add_(0, ids, output[it])
+            filled = torch.ones(output.shape[1])
+            filled.masked_fill_(positions[it] == -1, 0)
+            c.index_add_(0, ids, filled)
+            breakpoint()
+            predictions.append(t / c)
+
+        return predictions
 
 
 
@@ -220,6 +241,9 @@ class Kelso_Decoder_Layer(nn.Module):
         return batch
 
 
+def compute_loss(output: torch.Tensor, codes: torch.LongTensor, counts: torch.LongTensor) -> torch.Tensor:
+    pass
+
 if __name__ == '__main__':
     diagnoses = pl.read_parquet('data/processed/diagnoses.parquet')
     ccs_codes = pl.read_parquet('data/processed/codes.parquet')
@@ -242,21 +266,36 @@ if __name__ == '__main__':
 
     batch = diagnoses.head(config.batch_size)
 
-    b_codes     = list(batch['code_id'].to_numpy())
-    b_positions = list(batch['position'].to_numpy())
-    b_counts    = list(batch['count'].to_numpy())
+    codes     = list(batch['code_id'] .to_numpy())
+    positions = list(batch['position'].to_numpy())
+    counts    = list(batch['count']   .to_numpy())
 
+    # compute the inputs of the model
+    b_codes     = [x[:-int(c[-1])]                 for x, c in zip(codes,     counts)]
+    b_positions = [x[:-int(c[-1])].astype(np.int_) for x, c in zip(positions, counts)]
     lengths = [len(x) for x in b_codes]
     b_n     = max(lengths)
-    b_codes     = np.array([np.pad(x, (0, b_n - len(x))) for x in b_codes])
-    b_positions = np.array([np.pad(x, (0, b_n - len(x))) for x in b_positions]).astype(np.int_)
-
+    b_codes     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in b_codes])
+    b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in b_positions])
     b_codes     = torch.from_numpy(b_codes)    .to(config.device)
     b_positions = torch.from_numpy(b_positions).to(config.device)
     b_lengths   = torch.LongTensor(lengths)    .to(config.device)
 
+    # compute expected outputs for the loss
+    outputs = []    
+    for it in range(b_codes.shape[0]):
+        sz = len(counts[it])
+        out = np.zeros((sz-1, config.vocab_size))
+        cursor = counts[it][0]
+        for jt in range(1, sz):
+            cursor_end = cursor + counts[it][jt]
+            out[jt-1, codes[it][cursor:cursor_end]] = 1
+            cursor = cursor_end
+        outputs.append(out)
 
-    model(b_codes, b_positions, b_lengths)
+
+    prediction = model(b_codes, b_positions, b_lengths)
+    # compute_loss(prediction, b_codes, b_counts)
 
 
     

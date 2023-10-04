@@ -62,7 +62,7 @@ diagnoses = (
         ccs = col('ccs').fill_null(pl.lit(0)) # @todo this is a lazy way to deal with null values
     )
     .drop('icd_code')
-)
+).unique()
 
 ccs_codes = diagnoses[['ccs']].unique().sort('ccs')
 we_have_zero_code = 0 in ccs_codes['ccs'].head(1)
@@ -83,7 +83,7 @@ diagnoses = diagnoses.join(ccs_codes[['ccs', 'code_id']], on='ccs', how='left').
 diagnoses_a = (
     diagnoses
     .with_columns(
-        position = col('admittime').rank('dense').over('subject_id'),
+        position = col('admittime').rank('dense').over('subject_id') - 1,
     )
     .group_by('subject_id')
     .agg(
