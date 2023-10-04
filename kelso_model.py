@@ -53,7 +53,7 @@ class Rotary_Embedding:
         batch_y = batch[...,   head_dim // 2 :] 
         rotated = torch.cat((-batch_y, batch_x), dim=-1)
         cos_f = self.cos_buffer[positions].unsqueeze(1) # we will broadcast over dim 1
-        sin_f = self.sin_buffer[positions].unsqueeze(1)
+        sin_f = self.sin_buffer[positions].unsqueeze(1) # we will broadcast over dim 1
         return batch*cos_f + rotated*sin_f
 
 class Kelso_MLP(nn.Module):
@@ -72,11 +72,12 @@ class Kelso_MLP(nn.Module):
 class Kelso_Model(nn.Module):
     def __init__(self, config: Kelso_Config):
         super().__init__()
+        torch.set_default_device(config.device)
         self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
         rotary_embedding = Rotary_Embedding (
             config.head_dim,
             config.pos_base,
-            device = 'cpu', # @bug this is wrong!
+            device = config.device,
         )
         self.decoder_layers = nn.ModuleList([Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]) 
         self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
@@ -231,9 +232,11 @@ if __name__ == '__main__':
         num_heads   = 4,
         head_dim    = 128,
         pos_base    = 10_000,
-        device      = 'cpu',
+        device      = 'cuda',
         mlp_intermediate_size = 1024,
     )
+
+    config.device = torch.device(config.device)
 
     model = Kelso_Model(config)
 
@@ -244,13 +247,13 @@ if __name__ == '__main__':
     b_counts    = list(batch['count'].to_numpy())
 
     lengths = [len(x) for x in b_codes]
-    b_n = max(lengths)
+    b_n     = max(lengths)
     b_codes     = np.array([np.pad(x, (0, b_n - len(x))) for x in b_codes])
     b_positions = np.array([np.pad(x, (0, b_n - len(x))) for x in b_positions]).astype(np.int_)
 
-    b_codes     = torch.from_numpy(b_codes)
-    b_positions = torch.from_numpy(b_positions)
-    b_lengths  = torch.LongTensor(lengths)
+    b_codes     = torch.from_numpy(b_codes)    .to(config.device)
+    b_positions = torch.from_numpy(b_positions).to(config.device)
+    b_lengths   = torch.LongTensor(lengths)    .to(config.device)
 
 
     model(b_codes, b_positions, b_lengths)
