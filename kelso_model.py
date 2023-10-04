@@ -73,15 +73,15 @@ class Kelso_MLP(nn.Module):
 class Kelso_Model(nn.Module):
     def __init__(self, config: Kelso_Config):
         super().__init__()
-        torch.set_default_device(config.device)
-        self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
-        rotary_embedding = Rotary_Embedding (
-            config.head_dim,
-            config.pos_base,
-            device = config.device,
-        )
-        self.decoder_layers = nn.ModuleList([Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]) 
-        self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
+        with torch.device(config.device):
+            self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+            rotary_embedding = Rotary_Embedding (
+                config.head_dim,
+                config.pos_base,
+                device = config.device,
+            )
+            self.decoder_layers = nn.ModuleList([Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]) 
+            self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
 
     def forward(
         self,
@@ -147,15 +147,14 @@ class Kelso_Model(nn.Module):
         
         predictions = []
         for it in range(bsz):
-            t = torch.zeros((v_s[it], output.shape[-1]))
-            c = torch.zeros((v_s[it],))
+            t = torch.zeros((v_s[it], output.shape[-1]), device=output.device)
+            v = torch.zeros((v_s[it],), device=output.device)
             ids = positions[it].clamp(0)
             t.index_add_(0, ids, output[it])
-            filled = torch.ones(output.shape[1])
+            filled = torch.ones(output.shape[1], device=output.device)
             filled.masked_fill_(positions[it] == -1, 0)
-            c.index_add_(0, ids, filled)
-            breakpoint()
-            predictions.append(t / c)
+            v.index_add_(0, ids, filled)
+            predictions.append(t / v.unsqueeze(1))
 
         return predictions
 
@@ -241,8 +240,13 @@ class Kelso_Decoder_Layer(nn.Module):
         return batch
 
 
-def compute_loss(output: torch.Tensor, codes: torch.LongTensor, counts: torch.LongTensor) -> torch.Tensor:
-    pass
+def compute_loss(predictions, outputs) -> torch.Tensor:
+    losses = []
+    for pred, out in zip(predictions, outputs):
+        loss = F.cross_entropy(pred, out)
+        losses.append(loss)
+    total_loss = sum(losses)
+    return total_loss
 
 if __name__ == '__main__':
     diagnoses = pl.read_parquet('data/processed/diagnoses.parquet')
@@ -291,11 +295,11 @@ if __name__ == '__main__':
             cursor_end = cursor + counts[it][jt]
             out[jt-1, codes[it][cursor:cursor_end]] = 1
             cursor = cursor_end
+        out = torch.from_numpy(out).to(config.device)
         outputs.append(out)
 
-
     prediction = model(b_codes, b_positions, b_lengths)
-    # compute_loss(prediction, b_codes, b_counts)
+    compute_loss(prediction, outputs)
 
 
     
