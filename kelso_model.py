@@ -15,13 +15,106 @@ from dataclasses import dataclass
 class Kelso_Config:
     vocab_size:  int
     hidden_size: int
-    batch_size:  int
     num_layers:  int
     num_heads:   int
     head_dim:    int
     pos_base:    float
     device:      str
     mlp_intermediate_size: int
+
+
+class Kelso_Model(nn.Module):
+    def __init__(self, config: Kelso_Config):
+        super().__init__()
+        self.config = config
+        with torch.device(config.device):
+            self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+            rotary_embedding = Rotary_Embedding (
+                config.head_dim,
+                config.pos_base,
+                device = config.device,
+            )
+            self.decoder_layers = nn.ModuleList (
+                [Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]
+            ) 
+            self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
+
+    def forward(
+        self,
+        batch:     torch.Tensor,
+        positions: torch.LongTensor,
+        lengths:   torch.LongTensor,
+    ) -> List[torch.Tensor]:
+        # batch, position size is (bsz, b_n)  
+        if batch.shape != positions.shape:
+            raise ValueError(
+                f'position shape should be equal to batch shape. Expected: {batch.shape}, '
+                f'received: {positions.shape}'
+            )
+        # lenghts size is (bsz,)
+        if batch.shape[0] != lengths.shape[0] or len(lengths.shape) >  1:
+            raise ValueError(
+                f'lengths shape should be ({batch.shape[0]},) but it is {lengths.shape}' 
+            )
+
+        bsz, b_n = positions.shape
+        
+        # PHASE 1: embed the code_ids
+
+        # embedding has dim (bsz, n, hidden_size)
+        embeddings = self.embedding(batch)
+
+        # PHASE 2: create mask
+
+        # attention mask has dim (bsz, 1, b_n, b_n)
+        # decoder mask has dim (b_n, b_n)
+        # pad mask has dim (bsz, b_n)
+        decoder_mask = torch.full((b_n, b_n), torch.finfo(torch.float).min, device=self.config.device)
+        decoder_mask = torch.triu(decoder_mask, diagonal=1)
+
+        filter   = torch.arange(b_n, device=self.config.device).view((1, -1))
+        pad_mask = torch.full((bsz, b_n), torch.finfo(torch.float).min, device=self.config.device)
+        pad_mask = pad_mask.masked_fill_(filter < lengths.view((-1, 1)), 0)
+
+        decoder_mask = decoder_mask[None, None, :, :]
+        pad_mask = pad_mask[:, None, None, :]
+        mask = pad_mask + decoder_mask
+
+        # example of mask, corresponds to a sequence of length 6, padded from a sequence of length 3:
+        # (1s are actually -inf in implementation)
+        # 
+        # 0 1 1 1 1 1
+        # 0 0 1 1 1 1
+        # 0 0 0 1 1 1
+        # 0 0 0 1 1 1
+        # 0 0 0 1 1 1
+        # 0 0 0 1 1 1
+
+        # PHASE 3: transformer
+
+        batch = embeddings
+        for layer in self.decoder_layers:
+            batch = layer(batch, positions, mask) 
+
+        # PHASE 4: extract output
+        output = self.head(batch)
+        output.masked_fill_(positions.unsqueeze(2) == -1, 0)
+        v_s = positions.max(-1).values + 1
+
+        predictions = []
+        for it in range(bsz):
+            t = torch.zeros((v_s[it], output.shape[-1]), device=output.device)
+            v = torch.zeros((v_s[it],), device=output.device)
+            ids = positions[it].clamp(0)
+            t.index_add_(0, ids, output[it])
+            filled = torch.ones(output.shape[1], device=output.device)
+            filled.masked_fill_(positions[it] == -1, 0)
+            v.index_add_(0, ids, filled)
+            predictions.append(t / v.unsqueeze(1))
+
+        return predictions
+
+
 
 # See this [article](http://arxiv.org/abs/2104.09864)
 class Rotary_Embedding:
@@ -57,107 +150,25 @@ class Rotary_Embedding:
         sin_f = self.sin_buffer[positions].unsqueeze(1) # we will broadcast over dim 1
         return batch*cos_f + rotated*sin_f
 
-class Kelso_MLP(nn.Module):
-    def __init__(self, hidden_size: int, intermediate_size: int):
+
+class Kelso_Decoder_Layer(nn.Module):
+    def __init__(self, config: Kelso_Config, rotary_embedding: Rotary_Embedding):
         super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj   = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
-        self.act_fn    = F.silu
-
-    def forward(self, x):
-        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return down_proj
-
-
-class Kelso_Model(nn.Module):
-    def __init__(self, config: Kelso_Config):
-        super().__init__()
-        with torch.device(config.device):
-            self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
-            rotary_embedding = Rotary_Embedding (
-                config.head_dim,
-                config.pos_base,
-                device = config.device,
-            )
-            self.decoder_layers = nn.ModuleList([Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]) 
-            self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
-
-    def forward(
-        self,
-        batch:     torch.Tensor,
-        positions: torch.LongTensor,
-        lengths:   torch.LongTensor,
-    ) -> List[torch.Tensor]:
-        # batch, position size is (bsz, b_n)  
-        if batch.shape != positions.shape:
-            raise ValueError(
-                f'position shape should be equal to batch shape. Expected: {batch.shape}, '
-                f'received: {positions.shape}'
-            )
-        # lenghts size is (bsz,)
-        if batch.shape[0] != lengths.shape[0] or len(lengths.shape) >  1:
-            raise ValueError(
-                f'lengths shape should be ({batch.shape[0]},) but it is {lengths.shape}' 
-            )
-
-        bsz, b_n = positions.shape
-        
-        # PHASE 1: embed the code_ids
-
-        # embedding has dim (bsz, n, hidden_size)
-        embeddings = self.embedding(batch)
-
-        # PHASE 2: create mask
-
-        # attention mask has dim (bsz, 1, b_n, b_n)
-        # decoder mask has dim (b_n, b_n)
-        # pad mask has dim (bsz, b_n)
-        decoder_mask = torch.full((b_n, b_n), torch.finfo(torch.float).min, device=config.device)
-        decoder_mask = torch.triu(decoder_mask, diagonal=1)
-
-        filter   = torch.arange(b_n, device=config.device).view((1, -1))
-        pad_mask = torch.full((bsz, b_n), torch.finfo(torch.float).min, device=config.device)
-        pad_mask = pad_mask.masked_fill_(filter < lengths.view((-1, 1)), 0)
-
-        decoder_mask = decoder_mask[None, None, :, :]
-        pad_mask = pad_mask[:, None, None, :]
-        mask = pad_mask + decoder_mask
-
-        # example of mask, corresponds to a sequence of length 6, padded from a sequence of length 3:
-        # (1s are actually -inf in implementation)
-        # 
-        # 0 1 1 1 1 1
-        # 0 0 1 1 1 1
-        # 0 0 0 1 1 1
-        # 0 0 0 1 1 1
-        # 0 0 0 1 1 1
-        # 0 0 0 1 1 1
-
-        # PHASE 3: transformer
-
-        batch = embeddings
-        for layer in self.decoder_layers:
-            batch = layer(batch, positions, mask) 
-
-        # PHASE 4: extract output
-        output = self.head(batch)
-        output.masked_fill_(positions.unsqueeze(2) == -1, 0)
-        v_s = positions.max(-1).values + 1
-        
-        predictions = []
-        for it in range(bsz):
-            t = torch.zeros((v_s[it], output.shape[-1]), device=output.device)
-            v = torch.zeros((v_s[it],), device=output.device)
-            ids = positions[it].clamp(0)
-            t.index_add_(0, ids, output[it])
-            filled = torch.ones(output.shape[1], device=output.device)
-            filled.masked_fill_(positions[it] == -1, 0)
-            v.index_add_(0, ids, filled)
-            predictions.append(t / v.unsqueeze(1))
-
-        return predictions
-
+        self.attention = Kelso_Attention(config, rotary_embedding)
+        self.mlp = Kelso_MLP(config.hidden_size, config.mlp_intermediate_size)
+        self.normalization_pre  = nn.LayerNorm(config.hidden_size)
+        self.normalization_post = nn.LayerNorm(config.hidden_size)
+    
+    def forward(self, batch: torch.Tensor, positions: torch.LongTensor, mask: torch.Tensor):
+        residual = batch
+        batch = self.normalization_pre(batch)
+        batch = self.attention(batch, positions, mask)
+        batch = batch + residual
+        residual = batch
+        batch = self.normalization_post(batch)
+        batch = self.mlp(batch)
+        batch = batch + residual
+        return batch
 
 
 class Kelso_Attention(nn.Module):
@@ -219,25 +230,18 @@ class Kelso_Attention(nn.Module):
 
         return attn_output
 
-
-class Kelso_Decoder_Layer(nn.Module):
-    def __init__(self, config: Kelso_Config, rotary_embedding: Rotary_Embedding):
+class Kelso_MLP(nn.Module):
+    def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
-        self.attention = Kelso_Attention(config, rotary_embedding)
-        self.mlp = Kelso_MLP(config.hidden_size, config.mlp_intermediate_size)
-        self.normalization_pre  = nn.LayerNorm(config.hidden_size)
-        self.normalization_post = nn.LayerNorm(config.hidden_size)
-    
-    def forward(self, batch: torch.Tensor, positions: torch.LongTensor, mask: torch.Tensor):
-        residual = batch
-        batch = self.normalization_pre(batch)
-        batch = self.attention(batch, positions, mask)
-        batch = batch + residual
-        residual = batch
-        batch = self.normalization_post(batch)
-        batch = self.mlp(batch)
-        batch = batch + residual
-        return batch
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj   = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
+        self.act_fn    = F.silu
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
 
 
 def compute_loss(predictions, outputs) -> torch.Tensor:
@@ -248,58 +252,3 @@ def compute_loss(predictions, outputs) -> torch.Tensor:
     total_loss = sum(losses)
     return total_loss
 
-if __name__ == '__main__':
-    diagnoses = pl.read_parquet('data/processed/diagnoses.parquet')
-    ccs_codes = pl.read_parquet('data/processed/codes.parquet')
-
-    config = Kelso_Config (
-        vocab_size  = ccs_codes['code_id'].shape[0],
-        hidden_size = 256,
-        batch_size  = 8,
-        num_layers  = 3,
-        num_heads   = 4,
-        head_dim    = 128,
-        pos_base    = 10_000,
-        device      = 'cuda',
-        mlp_intermediate_size = 1024,
-    )
-
-    config.device = torch.device(config.device)
-
-    model = Kelso_Model(config)
-
-    batch = diagnoses.head(config.batch_size)
-
-    codes     = list(batch['code_id'] .to_numpy())
-    positions = list(batch['position'].to_numpy())
-    counts    = list(batch['count']   .to_numpy())
-
-    # compute the inputs of the model
-    b_codes     = [x[:-int(c[-1])]                 for x, c in zip(codes,     counts)]
-    b_positions = [x[:-int(c[-1])].astype(np.int_) for x, c in zip(positions, counts)]
-    lengths = [len(x) for x in b_codes]
-    b_n     = max(lengths)
-    b_codes     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in b_codes])
-    b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in b_positions])
-    b_codes     = torch.from_numpy(b_codes)    .to(config.device)
-    b_positions = torch.from_numpy(b_positions).to(config.device)
-    b_lengths   = torch.LongTensor(lengths)    .to(config.device)
-
-    # compute expected outputs for the loss
-    outputs = []    
-    for it in range(b_codes.shape[0]):
-        sz = len(counts[it])
-        out = np.zeros((sz-1, config.vocab_size))
-        cursor = counts[it][0]
-        for jt in range(1, sz):
-            cursor_end = cursor + counts[it][jt]
-            out[jt-1, codes[it][cursor:cursor_end]] = 1
-            cursor = cursor_end
-        out = torch.from_numpy(out).to(config.device)
-        outputs.append(out)
-
-    prediction = model(b_codes, b_positions, b_lengths)
-    compute_loss(prediction, outputs)
-
-
-    

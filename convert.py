@@ -92,8 +92,11 @@ diagnoses_a = (
 )
 diagnoses_b = (
     diagnoses
-    .group_by(['hadm_id', 'subject_id', 'admittime'])
-    .agg(pl.count())
+    .group_by(['subject_id', 'admittime'])
+    .agg(
+        pl.count(),
+        hadm_id = col('hadm_id').first(),
+     )
     .group_by('subject_id')
     .agg(col('count').sort_by('admittime'))
 )
