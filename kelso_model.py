@@ -2,7 +2,7 @@ import polars as pl
 import numpy as np
 
 import math
-from typing import List
+from typing import List, Union
 
 import torch
 from torch import nn
@@ -19,7 +19,7 @@ class Kelso_Config:
     num_heads:   int
     head_dim:    int
     pos_base:    float
-    device:      str
+    device:      Union[str, torch.device]
     mlp_intermediate_size: int
 
 

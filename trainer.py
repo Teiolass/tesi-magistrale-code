@@ -18,15 +18,24 @@ def log(txt: str):
     tqdm.write(txt)
 
 @dataclass(kw_only=True)
+class Metrics_Config:
+    recalls: List[int]
+    loss:    bool
+
+@dataclass(kw_only=True)
 class Trainer_Config:
-    batch_size:      int
-    num_epochs:      int
-    learning_rate:   float
-    max_patient_len: int # @bug
+    batch_size:        int
+    num_epochs:        int
+    learning_rate:     float
+    max_patient_len:   int # @todo
     limit_num_batches: Optional[int] = None
-    eval_split: float
-    test_split: float
-    weight_decay: float
+    eval_split:        float
+    test_split:        float
+    weight_decay:      float
+    eval_batch_size:   int
+    
+    # auto-filled
+    metrics_config: Optional[Metrics_Config] = None
 
 
 def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Config):
@@ -42,9 +51,9 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     # the order is train, eval, test. However they are taken from the dataset 
     # in the eval, test, train order
     split_fn = lambda x, y: (x[b[0]:b[1]] for b in y)
-    codes_train, codes_eval, codes_test = split_fn(codes, splits)
+    codes_train,     codes_eval,     codes_test     = split_fn(codes,     splits)
     positions_train, positions_eval, positions_test = split_fn(positions, splits)
-    counts_train, counts_eval, counts_test = split_fn(counts, splits)
+    counts_train,    counts_eval,    counts_test    = split_fn(counts,    splits)
 
     # find the number of batches
     num_batches = len(codes_train) // trainer_config.batch_size
@@ -67,14 +76,13 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau (
         optimizer,
         factor = 0.4,
-        patience = 5,
+        patience = 8,
     )
 
     # train loop
 
     for epoch in tqdm(range(trainer_config.num_epochs)):
         for batch_id in tqdm(range(num_batches), leave=False):
-        # for batch_id in range(num_batches):
             batch_start = batch_id * trainer_config.batch_size
             batch_end   = batch_start + trainer_config.batch_size
 
@@ -89,12 +97,100 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
 
             # feed-forward + backpropagation
             optimizer.zero_grad()
+            model.train()
             predictions = model(b_codes, b_positions, b_lengths)
             loss = compute_loss(predictions, outputs) / len(predictions)
             loss.backward()
             optimizer.step()
 
+        metrics = evaluate (
+            codes_eval,
+            positions_eval,
+            counts_eval,
+            trainer_config,
+        )
 
+        scheduler.step(metrics['loss'])
+
+        txt = ''
+        if trainer_config.metrics_config.loss:
+            txt += f"loss: {metrics['loss']:.3f}"
+        for k in trainer_config.metrics_config.recalls:
+            txt += f"    r{k}: {metrics['recall'][k]:.3f}"
+        log(txt)
+
+
+def evaluate (
+    codes:     List[np.ndarray],
+    positions: List[np.ndarray],
+    counts:    List[np.ndarray],
+    config: Trainer_Config,
+):
+    # prepare the metrics dict
+    metrics = {}
+    if config.metrics_config.loss:
+        metrics['loss'] = 0
+    metrics['recall'] = {}
+    for k in config.metrics_config.recalls:
+        metrics['recall'][k] = 0
+    divisor = 0
+
+    num_batches = len(codes) // config.eval_batch_size
+    for batch_id in tqdm(range(num_batches), leave=False):
+        batch_start = batch_id * config.eval_batch_size
+        batch_end   = batch_start + config.eval_batch_size
+
+        # get the right data for the batch
+        i_codes     = codes     [batch_start: batch_end]
+        i_positions = positions [batch_start: batch_end]
+        i_counts    = counts    [batch_start: batch_end]
+
+        b_codes, b_positions, b_lengths, outputs = prepare_data (
+            i_codes, i_positions, i_counts,
+        )
+
+        # computations
+        model.eval()
+        with torch.no_grad():
+            predictions = model(b_codes, b_positions, b_lengths)
+            m = compute_metrics(predictions, outputs, config.metrics_config)
+        if config.metrics_config.loss:
+            metrics['loss'] += m['loss']
+        for k in config.metrics_config.recalls:
+            metrics['recall'][k] += m['recall'][k]
+        divisor += sum([x.shape[0] for x in predictions])
+
+    if config.metrics_config.loss:
+        metrics['loss'] /= divisor
+    for k in config.metrics_config.recalls:
+        metrics['recall'][k] /= divisor
+    return metrics
+
+
+# @todo complete return type annotation
+def compute_metrics (predictions: List[torch.Tensor], outputs: List[torch.Tensor], config: Metrics_Config):
+    metrics = {}
+    if config.loss:
+        metrics['loss'] = compute_loss(predictions, outputs)
+    metrics['recall'] = {}
+    for k in config.recalls:
+        rec = []
+        for pred, out in zip(predictions, outputs):
+            # create shifter to index the flatten array
+            t = torch.ones(out.shape[0], dtype=int, device=out.device) * out.shape[-1]
+            t[0] = 0
+            t = t.cumsum(0).unsqueeze(1)
+
+            sel = pred.topk(k, dim=-1).indices
+            tp = out.flatten()[sel+t].sum(-1).to(float) # true positives
+            tt = out.sum(-1)
+            recall = (tp / tt).mean()
+            rec.append(float(recall))
+        metrics['recall'][k] = sum(rec)
+    return metrics
+
+
+# @todo type annotations
 def prepare_data(i_codes, i_positions, i_counts,):
     # prepare the data for the model
     b_codes     = [x[:-int(c[-1])]                 for x, c in zip(i_codes,     i_counts)]
@@ -147,14 +243,21 @@ if __name__ == '__main__':
 
     trainer_config = Trainer_Config (
         batch_size        = 64,
-        num_epochs        = 4,
-        learning_rate     = 1e-5,
+        num_epochs        = 1000,
+        learning_rate     = 5e-4,
         limit_num_batches = None,
         max_patient_len   = 300,
         eval_split        = 0.15,
         test_split        = 0.15,
         weight_decay      = 1e-3,
+        eval_batch_size   = 128
     )
+    metrics_config = Metrics_Config (
+        recalls = [5, 10, 20, 30],
+        loss    = True,
+    )
+
+    trainer_config.metrics_config = metrics_config
 
     diagnoses = diagnoses.filter(pl.col('count').list.sum() < trainer_config.max_patient_len)
 
