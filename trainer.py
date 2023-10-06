@@ -33,6 +33,8 @@ class Trainer_Config:
     test_split:        float
     weight_decay:      float
     eval_batch_size:   int
+    sched_patience:    int
+    sched_reduction:   float
     
     # auto-filled
     metrics_config: Optional[Metrics_Config] = None
@@ -75,14 +77,14 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau (
         optimizer,
-        factor = 0.4,
-        patience = 8,
+        factor   = trainer_config.sched_reduction,
+        patience = trainer_config.sched_patience,
     )
 
     # train loop
 
-    for epoch in tqdm(range(trainer_config.num_epochs)):
-        for batch_id in tqdm(range(num_batches), leave=False):
+    for epoch in tqdm(range(trainer_config.num_epochs), 'epoch'):
+        for batch_id in tqdm(range(num_batches), 'train', leave=False):
             batch_start = batch_id * trainer_config.batch_size
             batch_end   = batch_start + trainer_config.batch_size
 
@@ -112,11 +114,12 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
 
         scheduler.step(metrics['loss'])
 
-        txt = ''
+        txt = f'{epoch}. '
         if trainer_config.metrics_config.loss:
             txt += f"loss: {metrics['loss']:.3f}"
         for k in trainer_config.metrics_config.recalls:
             txt += f"    r{k}: {metrics['recall'][k]:.3f}"
+        txt += f"   lr:{optimizer.param_groups[0]['lr']:.3e}"
         log(txt)
 
 
@@ -136,7 +139,7 @@ def evaluate (
     divisor = 0
 
     num_batches = len(codes) // config.eval_batch_size
-    for batch_id in tqdm(range(num_batches), leave=False):
+    for batch_id in tqdm(range(num_batches), 'eval', leave=False):
         batch_start = batch_id * config.eval_batch_size
         batch_end   = batch_start + config.eval_batch_size
 
@@ -244,13 +247,15 @@ if __name__ == '__main__':
     trainer_config = Trainer_Config (
         batch_size        = 64,
         num_epochs        = 1000,
-        learning_rate     = 5e-4,
+        learning_rate     = 1e-4,
         limit_num_batches = None,
         max_patient_len   = 300,
         eval_split        = 0.15,
         test_split        = 0.15,
         weight_decay      = 1e-3,
-        eval_batch_size   = 128
+        eval_batch_size   = 128,
+        sched_patience    = 5,
+        sched_reduction   = 0.3,
     )
     metrics_config = Metrics_Config (
         recalls = [5, 10, 20, 30],
