@@ -58,7 +58,7 @@ class Kelso_Model(nn.Module):
             )
 
         bsz, b_n = positions.shape
-        
+
         # PHASE 1: embed the code_ids
 
         # embedding has dim (bsz, n, hidden_size)
@@ -67,50 +67,44 @@ class Kelso_Model(nn.Module):
         # PHASE 2: create mask
 
         # attention mask has dim (bsz, 1, b_n, b_n)
-        # decoder mask has dim (b_n, b_n)
+        # decoder mask has dim (bsz, b_n, b_n)
         # pad mask has dim (bsz, b_n)
-        decoder_mask = torch.full((b_n, b_n), torch.finfo(torch.float).min, device=self.config.device)
-        decoder_mask = torch.triu(decoder_mask, diagonal=1)
+        minus_inf = torch.finfo(torch.float).min
+        decoder_mask = torch.full((bsz, b_n, b_n), 0.0, device=self.config.device)
+        decoder_mask = decoder_mask.masked_fill_(positions.unsqueeze(2) < positions.unsqueeze(1), minus_inf)
 
         filter   = torch.arange(b_n, device=self.config.device).view((1, -1))
-        pad_mask = torch.full((bsz, b_n), torch.finfo(torch.float).min, device=self.config.device)
+        pad_mask = torch.full((bsz, b_n), minus_inf, device=self.config.device)
         pad_mask = pad_mask.masked_fill_(filter < lengths.view((-1, 1)), 0)
 
-        decoder_mask = decoder_mask[None, None, :, :]
+        decoder_mask = decoder_mask[:, None, :, :]
         pad_mask = pad_mask[:, None, None, :]
         mask = pad_mask + decoder_mask
-
-        # example of mask, corresponds to a sequence of length 6, padded from a sequence of length 3:
-        # (1s are actually -inf in implementation)
-        # 
-        # 0 1 1 1 1 1
-        # 0 0 1 1 1 1
-        # 0 0 0 1 1 1
-        # 0 0 0 1 1 1
-        # 0 0 0 1 1 1
-        # 0 0 0 1 1 1
 
         # PHASE 3: transformer
 
         batch = embeddings
         for layer in self.decoder_layers:
             batch = layer(batch, positions, mask) 
+        # @debug
+        batch = F.dropout(batch, p=0.99, training=self.training)
 
         # PHASE 4: extract output
-        output = self.head(batch)
-        output.masked_fill_(positions.unsqueeze(2) == -1, 0)
+
+        batch.masked_fill_(positions.unsqueeze(2) == -1, 0)
         v_s = positions.max(-1).values + 1
 
         predictions = []
         for it in range(bsz):
-            t = torch.zeros((v_s[it], output.shape[-1]), device=output.device)
-            v = torch.zeros((v_s[it],), device=output.device)
+            t = torch.zeros((v_s[it], batch.shape[-1]), device=batch.device)
+            v = torch.zeros((v_s[it],), device=batch.device)
             ids = positions[it].clamp(0)
-            t.index_add_(0, ids, output[it])
-            filled = torch.ones(output.shape[1], device=output.device)
+            t.index_add_(0, ids, batch[it])
+            filled = torch.ones(batch.shape[1], device=batch.device)
             filled.masked_fill_(positions[it] == -1, 0)
             v.index_add_(0, ids, filled)
-            predictions.append(t / v.unsqueeze(1))
+            output = self.head(t / v.unsqueeze(1))
+            predictions.append(output)
 
         return predictions
 
@@ -122,6 +116,8 @@ class Rotary_Embedding:
     base:   float
 
     def __init__(self, dim: int, base: float, *, device):
+        if dim % 2 != 0:
+            raise ValueError (f'Tried to instanciate a rotary embedding with a odd dimension ({dim})')
         self.dim  = dim
         self.base = base
 
@@ -130,8 +126,6 @@ class Rotary_Embedding:
         self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim))
 
     def increase_cache(self, seq_len: int):
-        # @bug the comment below is false!!
-        # sin_buffer and cos_buffer have shape (b_n, hidden_size)
         self.max_seq_len = seq_len
         t     = torch.arange(seq_len, device=self.inv_freq.device)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
@@ -161,13 +155,15 @@ class Kelso_Decoder_Layer(nn.Module):
     
     def forward(self, batch: torch.Tensor, positions: torch.LongTensor, mask: torch.Tensor):
         residual = batch
-        batch = self.normalization_pre(batch)
         batch = self.attention(batch, positions, mask)
+        batch = F.dropout(batch, p=0.8, training=self.training)
         batch = batch + residual
         residual = batch
-        batch = self.normalization_post(batch)
+        batch = self.normalization_pre(batch)
         batch = self.mlp(batch)
+        batch = F.dropout(batch, p=0.8, training=self.training)
         batch = batch + residual
+        batch = self.normalization_post(batch)
         return batch
 
 
@@ -179,10 +175,10 @@ class Kelso_Attention(nn.Module):
         self.hidden_size = config.hidden_size 
         self.rotary_embedding = rotary_embedding
 
-        self.q_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim)
-        self.k_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim)
-        self.v_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size)
+        self.q_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
     def forward (
         self,
@@ -226,6 +222,8 @@ class Kelso_Attention(nn.Module):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, b_n, self.num_heads * self.head_dim)
+        # @todo
+        attn_output = F.dropout(attn_output, p=0.8, training=self.training)
         attn_output = self.o_proj(attn_output)
 
         return attn_output
@@ -244,10 +242,21 @@ class Kelso_MLP(nn.Module):
 
 
 
+# @deprecated
+def compute_softmax_loss(predictions, outputs) -> torch.Tensor:
+    losses = []
+    for pred, out in zip(predictions, outputs):
+        loss = F.cross_entropy(pred, out, reduction='sum')
+        losses.append(loss)
+    total_loss = sum(losses)
+    return total_loss
+
+LOG_EPSILON = 1e-8
 def compute_loss(predictions, outputs) -> torch.Tensor:
     losses = []
     for pred, out in zip(predictions, outputs):
-        loss = F.cross_entropy(pred, out)
+        # if reduce='none' the function returns the same shape as input
+        loss = F.binary_cross_entropy_with_logits(pred, out, reduction='sum')
         losses.append(loss)
     total_loss = sum(losses)
     return total_loss

@@ -33,8 +33,6 @@ class Trainer_Config:
     test_split:        float
     weight_decay:      float
     eval_batch_size:   int
-    sched_patience:    int
-    sched_reduction:   float
     
     # auto-filled
     metrics_config: Optional[Metrics_Config] = None
@@ -75,15 +73,37 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
         trainer_config.learning_rate,
         weight_decay = trainer_config.weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau (
-        optimizer,
-        factor   = trainer_config.sched_reduction,
-        patience = trainer_config.sched_patience,
-    )
+    # @debug
+    # scheduler = Scheduler (
+    #     optimizer    = optimizer,
+    #     min_lr       = 1e-5,
+    #     max_lr       = 1e-4,
+    #     warmup_steps = 15,
+    #     gamma        = 0.995,
+    # )
 
-    # train loop
+    # @debug
+    # check the initial conditions
+    # metrics = evaluate (
+    #     codes_eval,
+    #     positions_eval,
+    #     counts_eval,
+    #     trainer_config,
+    # )
+    # txt = 'Initial metrics:  '
+    # if trainer_config.metrics_config.loss:
+    #     txt += f"   loss: {metrics['loss']:.3f}"
+    # for k in trainer_config.metrics_config.recalls:
+    #     txt += f"    r{k}: {metrics['recall'][k]*100:.1f}%"
+    # txt += f"   lr:{optimizer.param_groups[0]['lr']:.3e}"
+    # log(txt)
+
+    # Train Loop
 
     for epoch in tqdm(range(trainer_config.num_epochs), 'epoch'):
+        total_train_loss   = 0
+        train_loss_divisor = 0
+
         for batch_id in tqdm(range(num_batches), 'train', leave=False):
             batch_start = batch_id * trainer_config.batch_size
             batch_end   = batch_start + trainer_config.batch_size
@@ -101,10 +121,39 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
             optimizer.zero_grad()
             model.train()
             predictions = model(b_codes, b_positions, b_lengths)
-            loss = compute_loss(predictions, outputs) / len(predictions)
+            total_loss  = compute_loss(predictions, outputs)
+            divisor     = sum([x.shape[0] for x in predictions])
+            loss        = total_loss / divisor
             loss.backward()
+
+            ##############   @debug
+            show_batch_grad = []
+            if batch_id in show_batch_grad:
+                log(f'======== BATCH ID {batch_id} ========')
+                xx = {}
+                for i, layer in enumerate(model.decoder_layers):
+                    for n, p in layer.named_parameters():
+                        v = p.abs().mean()
+                        if n not in xx:
+                            xx[n] = [v]
+                        else:
+                            xx[n].append(v)
+                for key, v in xx.items():
+                    txt = f'{key: <30}:  '
+                    for x in v:
+                        txt += f'{x: <8.1e} '
+                    log(txt)
+                log(f'head weigths: {model.head.weight.grad.abs().mean():.1e}')
+                log(f'head bias   : {model.head.bias  .grad.abs().mean():.1e}')
+                log('')
+            ##############
+
             optimizer.step()
 
+            total_train_loss   += float(total_loss)
+            train_loss_divisor += divisor
+
+        train_loss = total_train_loss / train_loss_divisor
         metrics = evaluate (
             codes_eval,
             positions_eval,
@@ -112,15 +161,17 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
             trainer_config,
         )
 
-        scheduler.step(metrics['loss'])
-
-        txt = f'{epoch}. '
+        txt  = f'{epoch: >3}. '
+        txt += f'train_loss: {train_loss:.3f}'
         if trainer_config.metrics_config.loss:
-            txt += f"loss: {metrics['loss']:.3f}"
+            txt += f"   loss: {metrics['loss']:.3f}"
         for k in trainer_config.metrics_config.recalls:
-            txt += f"    r{k}: {metrics['recall'][k]:.3f}"
+            txt += f"    r{k}: {metrics['recall'][k]*100:.1f}%"
         txt += f"   lr:{optimizer.param_groups[0]['lr']:.3e}"
         log(txt)
+
+        # scheduler.step()
+
 
 
 def evaluate (
@@ -154,7 +205,8 @@ def evaluate (
 
         # computations
         model.eval()
-        with torch.no_grad():
+        # with torch.no_grad(): # @todo works?
+        with torch.inference_mode():
             predictions = model(b_codes, b_positions, b_lengths)
             m = compute_metrics(predictions, outputs, config.metrics_config)
         if config.metrics_config.loss:
@@ -210,16 +262,37 @@ def prepare_data(i_codes, i_positions, i_counts,):
     outputs = []
     for it in range(b_codes.shape[0]):
         sz = len(i_counts[it])
-        out = np.zeros((sz-1, model.config.vocab_size))
+        out = np.zeros((sz-1, model.config.vocab_size), dtype=float)
         cursor = i_counts[it][0]
         for jt in range(1, sz):
             cursor_end = cursor + i_counts[it][jt]
             out[jt-1, i_codes[it][cursor:cursor_end]] = 1
             cursor = cursor_end
-        out = torch.from_numpy(out).to(model.config.device)
+        out = torch.from_numpy(out).to(torch.float).to(model.config.device)
         outputs.append(out)
-
     return b_codes, b_positions, b_lengths, outputs
+
+class Scheduler:
+    def __init__(self, optimizer, min_lr, max_lr, warmup_steps, gamma):
+        # Attach optimizer
+        if not isinstance(optimizer, torch.optim.Optimizer):
+            raise TypeError(f'{type(optimizer).__name__} is not an Optimizer')
+        self.optimizer     = optimizer
+        self.min_lr        = min_lr
+        self.max_lr        = max_lr
+        self.warmup_steps  = warmup_steps
+        self.gamma         = gamma
+        self.epoch_counter = 0
+
+    def step(self):
+        self.epoch_counter += 1
+        if self.epoch_counter < self.warmup_steps:
+            lr = self.min_lr + (self.max_lr - self.min_lr) * self.epoch_counter / self.warmup_steps
+        else:
+            lr = max(self.max_lr * self.gamma ** (self.epoch_counter - self.warmup_steps), self.min_lr)
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+
 
 
 if __name__ == '__main__':
@@ -228,34 +301,32 @@ if __name__ == '__main__':
 
     config = Kelso_Config (
         vocab_size  = ccs_codes['code_id'].shape[0],
-        hidden_size = 64,
-        num_layers  = 12,
-        num_heads   = 8,
-        head_dim    = 32,
-        pos_base    = 10_000,
+        hidden_size = 256,
+        num_layers  = 0,
+        num_heads   = 16,
+        head_dim    = 64,
+        pos_base    = 8_000,
         device      = 'cuda',
-        mlp_intermediate_size = 256,
+        mlp_intermediate_size = 2048,
     )
     config.device = torch.device(config.device)
     model = Kelso_Model(config)
 
     num_params  = sum([param.nelement()                      for param in model.parameters()])
     size_params = sum([param.nelement()*param.element_size() for param in model.parameters()])
-    log(f'model has {num_params} params, occupying {size_params/1024/1024:.2f}M of memory')
+    log(f'model has {num_params/1e6:.2f}M params, occupying {size_params/1024/1024:.2f}M of memory')
 
 
     trainer_config = Trainer_Config (
         batch_size        = 64,
         num_epochs        = 1000,
-        learning_rate     = 1e-4,
+        learning_rate     = 3e-4,
         limit_num_batches = None,
-        max_patient_len   = 300,
-        eval_split        = 0.15,
+        max_patient_len   = 150,
+        eval_split        = 0.20,
         test_split        = 0.15,
-        weight_decay      = 1e-3,
+        weight_decay      = 0.2,
         eval_batch_size   = 128,
-        sched_patience    = 5,
-        sched_reduction   = 0.3,
     )
     metrics_config = Metrics_Config (
         recalls = [5, 10, 20, 30],
@@ -264,7 +335,15 @@ if __name__ == '__main__':
 
     trainer_config.metrics_config = metrics_config
 
+    num_patients_before = diagnoses.shape[0]
     diagnoses = diagnoses.filter(pl.col('count').list.sum() < trainer_config.max_patient_len)
+    num_patients_after = diagnoses.shape[0]
+    log (
+        f'Original dataset contains {num_patients_before} patients. We cut '
+        f'those with more than {trainer_config.max_patient_len} codes, so we are '
+        f'left with {num_patients_after} patients ' 
+        f'({(1 - num_patients_after / num_patients_before)*100:.1f}% less).'
+    )
 
     train (
         model          = model,
