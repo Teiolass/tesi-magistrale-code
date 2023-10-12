@@ -51,16 +51,14 @@ class Batch_Data:
         )
 
 
+@profile
 def train(model: nn.Module, diagnoses: pl.DataFrame, config: Trainer_Config):
     codes = list(diagnoses['code_id'] .to_numpy())
-
-    # @debug
-    codes = codes[:200]
 
     num_eval = int(trainer_config.eval_split * len(codes))
     num_test = int(trainer_config.test_split * len(codes))
     p = num_eval + num_test
-    splits   = ((p, len(codes)), (0, num_eval), (num_eval, p))
+    splits = ((p, len(codes)), (0, num_eval), (num_eval, p))
     # the order is train, eval, test. However they are taken from the dataset 
     # in the eval, test, train order
     codes_train, codes_eval, codes_test = (codes[b[0]:b[1]] for b in splits)
@@ -77,8 +75,8 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, config: Trainer_Config):
 
     # Train Loop
 
-    for epoch in tqdm(train_dataset, 'epoch'):
-        total_train_loss   = 0
+    for epoch in tqdm(range(config.num_epochs), 'epoch'):
+        total_train_loss = 0
 
         for batch in tqdm(train_dataset, 'train', leave=False):
             batch = batch.to(model.config.device)
@@ -128,8 +126,8 @@ def evaluate (
         with torch.inference_mode():
             prediction, patients_len = model(batch.codes, batch.codes_len, batch.visit_id)
             m = compute_metrics(prediction, batch.output, patients_len, config.metrics_config)
-        if config.metrics_config.loss:
-            metrics['loss'] += m['loss']
+
+        metrics['loss'] += m['loss']
         for k in config.metrics_config.recalls:
             metrics['recall'][k] += m['recall'][k]
 
@@ -151,18 +149,19 @@ def compute_metrics (
     metrics['recall'] = {}
 
     with torch.device(prediction.device):
-        filler = torch.arange(prediction.shape[0], dtype=int).unsqueeze(1)
-        flat_pred = torch.masked_select(prediction, filler < patients_len)
-        flat_out  = torch.masked_select(output    , filler < patients_len)
-        offsets = (flat_out.shape[1] * torch.arange(flat_pred.shape[0])).unsqueeze(1)
+        filler = torch.arange(prediction.shape[1], dtype=int).unsqueeze(0)
+        mask = (filler < patients_len.unsqueeze(1)).unsqueeze(2)
+        flat_pred = torch.masked_select(prediction, mask).view(-1, prediction.shape[-1])
+        flat_out  = torch.masked_select(output    , mask).view(-1, prediction.shape[-1])
 
         for k in config.recalls:
             best = flat_pred.topk(k, dim=-1).indices
-            indices = best + offsets 
-            sel = (flat_out.flatten()[indices.flatten]).view(best.shape)
+            offsets = flat_out.stride(-1) * torch.arange(best.size(0))
+            indices = best + offsets.unsqueeze(1)
+            sel = (flat_out.flatten()[indices.flatten()]).view(best.shape)
 
             nums = sel.sum(dim=-1)
-            dens = flta_out.sum(dim=-1)
+            dens = flat_out.sum(dim=-1)
             recs = nums / dens
             rec = recs.mean()
 

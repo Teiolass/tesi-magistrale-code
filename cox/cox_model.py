@@ -71,6 +71,7 @@ class Cox_Model(nn.Module):
             self.code_to_visit = nn.Linear(config.code_hidden_size, config.visit_hidden_size, bias=False)
             self.head = nn.Linear(config.visit_hidden_size, config.vocab_size, bias=True)
 
+    @profile
     def forward(
         self,
         codes:     torch.LongTensor, # (n_total_visits, n_codes)
@@ -205,6 +206,7 @@ class Cox_Transformer_Layer(nn.Module):
         self.normalization_post = nn.LayerNorm(config.hidden_size)
         self.dropout_prob = config.dropout_prob
 
+    @profile
     def forward(self, batch: torch.Tensor, mask: torch.Tensor, positions: Optional[torch.LongTensor]=None):
         residual = batch
         batch = self.attention(batch, mask, positions)
@@ -232,6 +234,7 @@ class Cox_Attention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
+    @profile
     def forward (
         self,
         hidden_states: torch.Tensor,
@@ -297,11 +300,12 @@ def compute_loss(
 ) -> torch.Tensor:
     with torch.device(prediction.device):
         filler = torch.arange(prediction.shape[1], dtype=int).unsqueeze(0)
-        mask = (filler < patients_len.unsqueeze(1)).unsqueeze(2)
-        flat_pred = torch.masked_select(prediction, mask)
-        flat_out  = torch.masked_select(output    , mask)
+    mask = (filler < patients_len.unsqueeze(1)).unsqueeze(2)
+    flat_pred = torch.masked_select(prediction, mask).view(-1, prediction.shape[-1])
+    flat_out  = torch.masked_select(output    , mask).view(-1, prediction.shape[-1])
 
-        # if reduce='none' the function returns the same shape as input
-        loss = F.binary_cross_entropy_with_logits(flat_pred, flat_out, reduction='mean')
+    # if reduce='none' the function returns the same shape as input
+    cross_entropy = F.binary_cross_entropy_with_logits(flat_pred, flat_out, reduction='none')
+    loss = cross_entropy.sum(dim=-1).mean()
     return loss
 
