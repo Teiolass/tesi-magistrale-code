@@ -2,7 +2,7 @@ import polars as pl
 import numpy as np
 
 import math
-from typing import List, Union
+from typing import List, Union, Optional
 
 import torch
 from torch import nn
@@ -44,16 +44,16 @@ class Cox_Model(nn.Module):
             code_transformer_config = Cox_Transformer_Config (
                 hidden_size       = config.code_hidden_size,
                 intermediate_size = config.code_intermediate_size,
-                head_dim          = config.code_head_dim
-                num_heads         = config.code_num_heads
-                dropout_prob      = config.dropout_prob
+                head_dim          = config.code_head_dim,
+                num_heads         = config.code_num_heads,
+                dropout_prob      = config.dropout_prob,
             )
             visit_transformer_config = Cox_Transformer_Config (
                 hidden_size       = config.visit_hidden_size,
                 intermediate_size = config.visit_intermediate_size,
-                head_dim          = config.visit_head_dim
-                num_heads         = config.visit_num_heads
-                dropout_prob      = config.dropout_prob
+                head_dim          = config.visit_head_dim,
+                num_heads         = config.visit_num_heads,
+                dropout_prob      = config.dropout_prob,
             )
 
             self.code_layers  = nn.ModuleList (
@@ -77,9 +77,10 @@ class Cox_Model(nn.Module):
         codes_len: torch.LongTensor, # (n_total_visits,)
         visit_id:  torch.LongTensor, # (n_total_visits,)
     ):
-        with torch.device(visits.device):
+        with torch.device(codes.device):
             # code_batch: (n_total_visits, n_codes, code_hidden_size)
             code_batch = self.embedding(codes)
+            n_total_visits, n_codes, _ = code_batch.shape
 
             ### prepare the attention mask for the visit layer transformer
 
@@ -89,14 +90,19 @@ class Cox_Model(nn.Module):
             filter = torch.arange(n_codes).view((1, -1))
             mask   = torch.full((n_total_visits, n_codes), SUPER_SMALL_NUMBER)
             mask   = mask.masked_fill_(filter < codes_len.view((-1, 1)), 0)
+            pad_mask = mask[:, None, None, :]
 
             ### code level transformer
 
             for layer in self.code_layers:
-                code_batch = layer(code_batch, mask)
+                code_batch = layer(code_batch, pad_mask)
+
+            # visits: (n_total_visits, n_codes, visit_hidden_size)
+            visits = self.code_to_visit(code_batch)
 
             # visits: (n_total_visits, visit_hidden_size)
-            visits = self.code_to_visit(code_hidden)
+            visits.masked_fill_(mask[..., None] < -1, 0)
+            visits = visits.mean(dim=1)
 
             ### batch data on a visit level rather than a code level
 
@@ -112,8 +118,8 @@ class Cox_Model(nn.Module):
             pos = torch.arange(visits.shape[0], dtype=int) - starting[visit_id]
             flatten_pos = batch_dim * visit_id + pos
 
-            t = torch.zeros((bsz, batch_dim, self.config.visit_hidden_size))
-            visits = t.view(-1, visits.shape[-1]).index_copy_(0, flatten_pos, visits).view(t.shape)
+            t = torch.zeros((bsz * batch_dim, self.config.visit_hidden_size))
+            visits = t.index_copy_(0, flatten_pos, visits).view(bsz, batch_dim, self.config.visit_hidden_size)
 
             ### prepare the attention mask for the visit layer transformer
 
@@ -123,11 +129,11 @@ class Cox_Model(nn.Module):
 
             decoder_mask = torch.full((batch_dim, batch_dim), SUPER_SMALL_NUMBER).triu_(diagonal=1)
 
-            filter   = torch.arange(b_n).view((1, -1))
+            filter   = torch.arange(batch_dim).view((1, -1))
             pad_mask = torch.full((bsz, batch_dim), SUPER_SMALL_NUMBER)
             pad_mask = pad_mask.masked_fill_(filter < patients_len.view((-1, 1)), 0)
 
-            decoder_mask = decoder_mask[:, None, :, :]
+            decoder_mask = decoder_mask[None, None, :, :]
             pad_mask     = pad_mask[:, None, None, :]
             mask = pad_mask + decoder_mask
 
@@ -194,12 +200,12 @@ class Cox_Transformer_Layer(nn.Module):
     ):
         super().__init__()
         self.attention = Cox_Attention(config, rotary_embedding)
-        self.mlp = Cox_MLP(transformer_config.hidden_size, transformer_config.intermediate_size)
-        self.normalization_pre  = nn.LayerNorm(transformer_config.hidden_size)
-        self.normalization_post = nn.LayerNorm(transformer_config.hidden_size)
+        self.mlp = Cox_MLP(config.hidden_size, config.intermediate_size)
+        self.normalization_pre  = nn.LayerNorm(config.hidden_size)
+        self.normalization_post = nn.LayerNorm(config.hidden_size)
         self.dropout_prob = config.dropout_prob
 
-    def forward(self, batch: torch.Tensor, mask: torch.Tensor, positions: Optional[torch.LongTensor]):
+    def forward(self, batch: torch.Tensor, mask: torch.Tensor, positions: Optional[torch.LongTensor]=None):
         residual = batch
         batch = self.attention(batch, mask, positions)
         batch = F.dropout(batch, p=self.dropout_prob, training=self.training)
@@ -229,8 +235,8 @@ class Cox_Attention(nn.Module):
     def forward (
         self,
         hidden_states: torch.Tensor,
-        positions:     Optional[torch.LongTensor],
         mask:          torch.Tensor,
+        positions:     Optional[torch.LongTensor],
     ):
         bsz, b_n, _ = hidden_states.shape
 
@@ -252,10 +258,6 @@ class Cox_Attention(nn.Module):
                 f" {attn_weights.size()}"
             )
 
-        if mask.size() != (bsz, 1, b_n, b_n):
-            raise ValueError(
-                f"Attention mask should be of size {(bsz, 1, b_n, b_n)}, but is {mask.size()}"
-            )
         attn_weights = attn_weights + mask
 
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
@@ -288,23 +290,18 @@ class Cox_MLP(nn.Module):
         return down_proj
 
 
+def compute_loss(
+    prediction:   torch.Tensor,
+    output:       torch.Tensor,
+    patients_len: torch.LongTensor
+) -> torch.Tensor:
+    with torch.device(prediction.device):
+        filler = torch.arange(prediction.shape[1], dtype=int).unsqueeze(0)
+        mask = (filler < patients_len.unsqueeze(1)).unsqueeze(2)
+        flat_pred = torch.masked_select(prediction, mask)
+        flat_out  = torch.masked_select(output    , mask)
 
-# @deprecated
-def compute_softmax_loss(predictions, outputs) -> torch.Tensor:
-    losses = []
-    for pred, out in zip(predictions, outputs):
-        loss = F.cross_entropy(pred, out, reduction='sum')
-        losses.append(loss)
-    total_loss = sum(losses)
-    return total_loss
-
-LOG_EPSILON = 1e-8
-def compute_loss(predictions, outputs) -> torch.Tensor:
-    losses = []
-    for pred, out in zip(predictions, outputs):
         # if reduce='none' the function returns the same shape as input
-        loss = F.binary_cross_entropy_with_logits(pred, out, reduction='sum')
-        losses.append(loss)
-    total_loss = sum(losses)
-    return total_loss
+        loss = F.binary_cross_entropy_with_logits(flat_pred, flat_out, reduction='mean')
+    return loss
 
