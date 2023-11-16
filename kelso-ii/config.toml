@@ -1,0 +1,29 @@
+diagnoses_path = 'data/processed/diagnoses.parquet'
+ccs_codes_path = 'data/processed/codes.parquet'
+
+[model]
+hidden_size = 64
+num_layers  = 8
+num_heads   = 4
+head_dim    = 64
+pos_base    = 10_000
+dropout     = 0.25
+device      = 'cuda'
+mlp_intermediate_size = 256
+
+[trainer]
+batch_size      = 64
+num_epochs      = 1000
+learning_rate   = 8e-4
+max_patient_len = 150
+eval_split      = 0.15
+test_split      = 0.15
+weight_decay    = 0.001
+eval_batch_size = 64
+ccs_as_inputs   = false
+patience        = 10
+save_directory  = 'results/kelso2-%(id)-%(date)/'
+# limit_num_batches = 300
+
+[metrics]
+recalls = [5, 10, 20, 30]

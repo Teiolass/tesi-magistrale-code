@@ -2,7 +2,6 @@ import polars as pl
 import numpy as np
 
 import math
-from typing import List, Union
 
 import torch
 from torch import nn
@@ -14,12 +13,14 @@ from dataclasses import dataclass
 @dataclass(kw_only=True)
 class Kelso_Config:
     vocab_size:  int
+    output_size: int
     hidden_size: int
     num_layers:  int
     num_heads:   int
     head_dim:    int
     pos_base:    float
-    device:      Union[str, torch.device]
+    dropout:     float
+    device:      str | torch.device
     mlp_intermediate_size: int
 
 
@@ -37,14 +38,14 @@ class Kelso_Model(nn.Module):
             self.decoder_layers = nn.ModuleList (
                 [Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]
             ) 
-            self.head = nn.Linear(config.hidden_size, config.vocab_size, bias=True)
+            self.head = nn.Linear(config.hidden_size, config.output_size, bias=True)
 
     def forward(
         self,
         batch:     torch.Tensor,
         positions: torch.LongTensor,
         lengths:   torch.LongTensor,
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         # batch, position size is (bsz, b_n)  
         if batch.shape != positions.shape:
             raise ValueError(
@@ -69,6 +70,7 @@ class Kelso_Model(nn.Module):
         # attention mask has dim (bsz, 1, b_n, b_n)
         # decoder mask has dim (bsz, b_n, b_n)
         # pad mask has dim (bsz, b_n)
+
         minus_inf = torch.finfo(torch.float).min
         decoder_mask = torch.full((bsz, b_n, b_n), 0.0, device=self.config.device)
         decoder_mask = decoder_mask.masked_fill_(positions.unsqueeze(2) < positions.unsqueeze(1), minus_inf)
@@ -86,8 +88,7 @@ class Kelso_Model(nn.Module):
         batch = embeddings
         for layer in self.decoder_layers:
             batch = layer(batch, positions, mask) 
-        # @debug
-        batch = F.dropout(batch, p=0.99, training=self.training)
+        batch = F.dropout(batch, p=self.config.dropout, training=self.training)
 
         # PHASE 4: extract output
 
@@ -152,16 +153,17 @@ class Kelso_Decoder_Layer(nn.Module):
         self.mlp = Kelso_MLP(config.hidden_size, config.mlp_intermediate_size)
         self.normalization_pre  = nn.LayerNorm(config.hidden_size)
         self.normalization_post = nn.LayerNorm(config.hidden_size)
+        self.dropout = config.dropout
     
     def forward(self, batch: torch.Tensor, positions: torch.LongTensor, mask: torch.Tensor):
         residual = batch
         batch = self.attention(batch, positions, mask)
-        batch = F.dropout(batch, p=0.8, training=self.training)
+        batch = F.dropout(batch, p=self.dropout, training=self.training)
         batch = batch + residual
         residual = batch
         batch = self.normalization_pre(batch)
         batch = self.mlp(batch)
-        batch = F.dropout(batch, p=0.8, training=self.training)
+        batch = F.dropout(batch, p=self.dropout, training=self.training)
         batch = batch + residual
         batch = self.normalization_post(batch)
         return batch
@@ -179,6 +181,8 @@ class Kelso_Attention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+
+        self.dropout = config.dropout
 
     def forward (
         self,
@@ -211,7 +215,7 @@ class Kelso_Attention(nn.Module):
             )
         attn_weights = attn_weights + mask
 
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+        attn_weights = F.softmax(attn_weights, dim=-1)
         attn_output  = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, b_n, self.head_dim):
@@ -222,8 +226,7 @@ class Kelso_Attention(nn.Module):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, b_n, self.num_heads * self.head_dim)
-        # @todo
-        attn_output = F.dropout(attn_output, p=0.8, training=self.training)
+        attn_output = F.dropout(attn_output, p=self.dropout, training=self.training)
         attn_output = self.o_proj(attn_output)
 
         return attn_output
@@ -240,18 +243,6 @@ class Kelso_MLP(nn.Module):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
-
-
-# @deprecated
-def compute_softmax_loss(predictions, outputs) -> torch.Tensor:
-    losses = []
-    for pred, out in zip(predictions, outputs):
-        loss = F.cross_entropy(pred, out, reduction='sum')
-        losses.append(loss)
-    total_loss = sum(losses)
-    return total_loss
-
-LOG_EPSILON = 1e-8
 def compute_loss(predictions, outputs) -> torch.Tensor:
     losses = []
     for pred, out in zip(predictions, outputs):
