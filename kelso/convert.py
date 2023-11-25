@@ -13,7 +13,8 @@ ccs_single_file = 'ccs_single_dx_tool_2015.csv'
 icd_conv_file   = 'icd10cmtoicd9gem.csv'
 
 output_diagnoses = 'diagnoses.parquet'
-output_codes     = 'codes.parquet'
+output_ccs       = 'ccs.parquet'
+output_icd       = 'icd.parquet'
 
 min_icd_occurences = 20
 
@@ -61,7 +62,8 @@ diagnoses = (
         how = 'left'
     )
     .with_columns (
-        ccs = col('ccs').fill_null(pl.lit(0)) # @todo this is a lazy way to deal with null values
+        ccs = col('ccs').fill_null(pl.lit(0)), # @todo this is a lazy way to deal with null values
+        icd_code = col('icd_code').fill_null(pl.lit('NoDx'))
     )
 ).unique()
 
@@ -70,7 +72,7 @@ ccs_codes = diagnoses[['ccs']].unique().sort('ccs')
 we_have_zero_code = 0 in ccs_codes['ccs'].head(1)
 if not we_have_zero_code:
     print('WARNING: we do not have a zero code!')
-ccs_codes = ccs_codes.join(ccs_conv.unique('ccs'), on='ccs', how='left')
+ccs_codes = ccs_codes.join(ccs_conv.drop('icd9').unique('ccs'), on='ccs', how='left')
 starting_index = 0 if we_have_zero_code else 1
 indexes = pl.DataFrame({'ccs_id': range(starting_index, starting_index+ccs_codes.shape[0])})
 ccs_codes = pl.concat([ccs_codes, indexes], how='horizontal')
@@ -127,6 +129,6 @@ diagnoses_b = (
 )
 diagnoses = diagnoses_a.join(diagnoses_b, on='subject_id', how='inner')
 
-diagnoses.write_parquet(os.path.join(output_prefix, output_diagnoses))
-ccs_codes.write_parquet(os.path.join(output_prefix, output_codes))
-
+diagnoses .write_parquet(os.path.join(output_prefix, output_diagnoses))
+ccs_codes .write_parquet(os.path.join(output_prefix, output_ccs))
+icd9_codes.write_parquet(os.path.join(output_prefix, output_icd))

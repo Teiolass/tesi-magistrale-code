@@ -64,7 +64,7 @@ def log_metrics(metrics: Epoch_Metrics, trainer_config: Trainer_Config):
     txt += f'train_loss: {metrics.train_loss:.3f}'
     txt += f'   eval loss: {metrics.eval_loss:.3f}'
     for k in trainer_config.metrics_config.recalls:
-        txt += f"    r{k}: {metrics.recalls[k]*100:.1f}%"
+        txt += f"    r{k}: {metrics.recalls[k]*100:.2f}%"
     txt += f"   lr:{metrics.learn_rate:.3e}"
 
     nice_print(txt)
@@ -167,6 +167,8 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     else:
         nice_print(f'dataset contains {num_batches} batches of {trainer_config.batch_size}')
 
+    model_save_path = os.path.join(trainer_config.save_directory, MODEL_FILE_NAME)
+
     #configure the optimizer
     optimizer = torch.optim.AdamW (
         model.parameters(),
@@ -178,68 +180,74 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
 
     # Train Loop
 
-    for epoch in tqdm(range(trainer_config.num_epochs), 'epoch'):
-        total_train_loss   = 0
-        train_loss_divisor = 0
+    try:
+        for epoch in tqdm(range(trainer_config.num_epochs), 'epoch', leave=False):
+            total_train_loss   = 0
+            train_loss_divisor = 0
 
-        for batch_id in tqdm(range(num_batches), 'train', leave=False):
-            batch_start = batch_id * trainer_config.batch_size
-            batch_end   = batch_start + trainer_config.batch_size
+            for batch_id in tqdm(range(num_batches), 'train', leave=False):
+                batch_start = batch_id * trainer_config.batch_size
+                batch_end   = batch_start + trainer_config.batch_size
 
-            # get the right data for the batch
-            i_ccs       = ccs_train       [batch_start: batch_end]
-            i_input     = input_train     [batch_start: batch_end]
-            i_positions = positions_train [batch_start: batch_end]
-            i_counts    = counts_train    [batch_start: batch_end]
+                # get the right data for the batch
+                i_ccs       = ccs_train       [batch_start: batch_end]
+                i_input     = input_train     [batch_start: batch_end]
+                i_positions = positions_train [batch_start: batch_end]
+                i_counts    = counts_train    [batch_start: batch_end]
 
-            b_codes, b_positions, b_lengths, outputs = prepare_data (
-                i_ccs, i_input, i_positions, i_counts,
+                b_codes, b_positions, b_lengths, outputs = prepare_data (
+                    i_ccs, i_input, i_positions, i_counts,
+                )
+
+                # feed-forward + backpropagation
+                optimizer.zero_grad()
+                model.train()
+                predictions = model(b_codes, b_positions, b_lengths)
+                total_loss  = compute_loss(predictions, outputs)
+                divisor     = sum([x.shape[0] for x in predictions])
+                loss        = total_loss / divisor
+                loss.backward()
+
+                optimizer.step()
+
+                total_train_loss   += float(total_loss)
+                train_loss_divisor += divisor
+
+            train_loss = total_train_loss / train_loss_divisor
+            metrics_dict = evaluate (
+                model,
+                ccs_eval,
+                input_eval,
+                positions_eval,
+                counts_eval,
+                trainer_config,
             )
+            
+            metrics = Epoch_Metrics (
+                epoch      = epoch,
+                learn_rate = float(optimizer.param_groups[0]['lr']),
+                train_loss = train_loss,
+                eval_loss  = metrics_dict['loss'],
+                recalls    = metrics_dict['recalls']
+            )
+            log_metrics(metrics, trainer_config)
 
-            # feed-forward + backpropagation
-            optimizer.zero_grad()
-            model.train()
-            predictions = model(b_codes, b_positions, b_lengths)
-            total_loss  = compute_loss(predictions, outputs)
-            divisor     = sum([x.shape[0] for x in predictions])
-            loss        = total_loss / divisor
-            loss.backward()
+            # The `min_is_better` field is relevant in constructor!!
+            stopper_result = stopper.check(epoch, metrics.eval_loss)
 
-            optimizer.step()
+            if stopper_result.is_best_round:
+                torch.save(model.state_dict(), model_save_path)
 
-            total_train_loss   += float(total_loss)
-            train_loss_divisor += divisor
+            if stopper_result.should_exit:
+                nice_print('It seems we are done here...')
+                break
+    except KeyboardInterrupt:
+        nice_print('exiting loop...')
 
-        train_loss = total_train_loss / train_loss_divisor
-        metrics_dict = evaluate (
-            ccs_eval,
-            input_eval,
-            positions_eval,
-            counts_eval,
-            trainer_config,
-        )
-        
-        metrics = Epoch_Metrics (
-            epoch      = epoch,
-            learn_rate = float(optimizer.param_groups[0]['lr']),
-            train_loss = train_loss,
-            eval_loss  = metrics_dict['loss'],
-            recalls    = metrics_dict['recalls']
-        )
-        log_metrics(metrics, trainer_config)
 
-        # The `min_is_better` field is relevant in constructor!!
-        stopper_result = stopper.check(epoch, metrics.eval_loss)
-
-        if stopper_result.is_best_round:
-            save_path = os.path.join(trainer_config.save_directory, MODEL_FILE_NAME)
-            torch.save(model.state_dict(), save_path)
-
-        if stopper_result.should_exit:
-            nice_print('It seems we are done here...')
-            break
-
+    model.load_state_dict(torch.load(model_save_path))
     metrics_dict = evaluate (
+        model,
         ccs_test,
         input_test,
         positions_test,
@@ -255,6 +263,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
 
 
 def evaluate (
+    model: nn.Module,
     ccs_codes: list[np.ndarray],
     icd_codes: list[np.ndarray],
     positions: list[np.ndarray],
@@ -270,7 +279,7 @@ def evaluate (
     divisor = 0
 
     num_batches = len(ccs_codes) // config.eval_batch_size
-    for batch_id in tqdm(range(num_batches), 'eval', leave=False):
+    for batch_id in tqdm(range(num_batches), ' eval', leave=False):
         batch_start = batch_id * config.eval_batch_size
         batch_end   = batch_start + config.eval_batch_size
 
@@ -302,7 +311,7 @@ def evaluate (
 
 def compute_metrics (predictions: list[torch.Tensor], outputs: list[torch.Tensor], config: Metrics_Config):
     metrics = {}
-    metrics['loss'] = compute_loss(predictions, outputs)
+    metrics['loss'] = float(compute_loss(predictions, outputs))
     metrics['recalls'] = {}
     for k in config.recalls:
         rec = []
@@ -402,10 +411,13 @@ if __name__ == '__main__':
     training_infos['num_parameters'] = num_params
     config['training_infos'] = training_infos
 
+    # update toml document
     new_config_text = tomlkit.dumps(config)
     new_config_path = os.path.join(trainer_config.save_directory, CFG_FILE_NAME)
     with open(new_config_path, 'w') as f:
         f.write(new_config_text)
+
+    starting_time = datetime.now()
 
     results = train (
         model          = model,
@@ -413,6 +425,12 @@ if __name__ == '__main__':
         trainer_config = trainer_config,
     )
 
+    # compute training time
+    end_time = datetime.now()
+    time_delta = end_time - starting_time
+    config['training_infos']['training_time'] = str(time_delta)
+
+    # add test data to toml document
     test_results = tomlkit.table()
     test_results['training_epochs'] = results.num_epochs
     test_results['loss'] = results.loss
@@ -420,9 +438,17 @@ if __name__ == '__main__':
         test_results[f'recall_{k}'] = results.recalls[k]
     config['test_results'] = test_results
 
+    # save new results on config file
     new_config_text = tomlkit.dumps(config)
     with open(new_config_path, 'w') as f:
         f.write(new_config_text)
+
+    # print the test results on screen
+    txt = [f'test loss: {results.loss:.3f}']
+    for k in sorted(metrics_config.recalls):
+        txt += [f'recall_{k: <2}: {results.recalls[k]*100:.2f}%']
+    txt = '    '.join(txt)
+    nice_print(txt)
 
 
 
