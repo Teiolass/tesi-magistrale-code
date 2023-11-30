@@ -1,0 +1,29 @@
+diagnoses_path = 'data/processed/diagnoses.parquet'
+ccs_codes_path = 'data/processed/codes.parquet'
+
+[model]
+code_hidden_size        = 64
+code_num_layers         = 4
+code_num_heads          = 8
+code_head_dim           = 64
+code_intermediate_size  = 256
+visit_hidden_size       = 1024
+visit_num_layers        = 4
+visit_num_heads         = 16
+visit_head_dim          = 256
+visit_intermediate_size = 4096
+dropout_prob            = 0.4
+pos_base                = 10_000.0
+device                  = 'cuda'
+
+[train]
+batch_size      = 256
+num_epochs      = 1000
+learning_rate   = 1e-4
+eval_split      = 0.15
+test_split      = 0.15
+weight_decay    = 1e-3
+eval_batch_size = 256
+
+[metrics]
+recalls = [5, 10, 20, 30]
