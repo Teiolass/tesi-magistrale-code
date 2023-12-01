@@ -6,7 +6,6 @@ ontology_path = 'data/processed/ontology.parquet'
 ontology = pl.read_parquet(ontology_path)
 
 ontology_array = ontology[['icd9_id', 'parent_id']].to_numpy()
-breakpoint()
 gen.get_parent(ontology_array, 34)
 
 breakpoint()

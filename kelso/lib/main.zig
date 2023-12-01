@@ -13,8 +13,8 @@ var generator_error: ?*py.PyObject = null;
 // This python module will export three functions
 const module_methods = [_]py.PyMethodDef{
     .{
-        .ml_name = "get_parent",
-        .ml_meth = get_genealogy,
+        .ml_name = "set_ontology",
+        .ml_meth = set_ontology,
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "",
     },
@@ -73,30 +73,53 @@ const module_methods = [_]py.PyMethodDef{
 //     return obj;
 // }
 
-export fn get_genealogy(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
+var ontology: []u32 = undefined;
+
+export fn set_ontology(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
     _ = self_obj;
     var arg1: ?*py.PyObject = undefined;
-    var id: i64 = undefined;
 
-    if (py.PyArg_ParseTuple(args, "Ol", &arg1, &id) == 0) return null;
+    if (py.PyArg_ParseTuple(args, "Ol", &arg1) == 0) return null;
     const _arr = np.from_otf(arg1, Np.Types.UINT, Np.Array_Flags.IN_ARRAY) orelse return null;
     const arr: *Np.Array_Obj = @ptrCast(_arr);
 
-    const tree: []u32 = blk: {
+    var size: usize = undefined;
+    var tree: []u32 = undefined;
+    {
         const data: [*]u32 = @ptrCast(@alignCast(arr.data));
         const nd = arr.nd;
-        if (nd != 1) {
+        if (nd != 2) {
             py.PyErr_SetString(generator_error, "Array should have a single dimension");
             return null;
         }
-        const size: usize = @intCast(arr.dimensions[0]);
-        break :blk data[0..size];
+        const num_fields: usize = @intCast(arr.dimensions[1]);
+        if (num_fields != 2) {
+            const message = std.fmt.allocPrint(
+                global_arena,
+                "Array should have dim (*, 2), found dim ({}, {})",
+                .{ arr.dimensions[0], arr.dimensions[1] },
+            ) catch "Error";
+            py.PyErr_SetString(generator_error, @ptrCast(message));
+            return null;
+        }
+        size = @intCast(arr.dimensions[0]);
+        tree = data[0 .. 2 * size];
+    }
+
+    const max_id = blk: {
+        var max: u32 = 0;
+        for (0..size) |it| {
+            max = @max(tree[2 * it], max);
+        }
+        break :blk max;
     };
 
-    std.debug.print("Length of ontology is {}. Id is {}\n", .{ tree.len, id });
-
-    const parent = tree[@intCast(id)];
-    std.debug.print("parent id: {}\n", .{parent});
+    ontology = std.heap.page_allocator.alloc(u32, max_id + 1) catch return null;
+    for (0..size) |it| {
+        const child = tree[2 * it];
+        const parent = tree[2 * it + 1];
+        ontology[child] = parent;
+    }
 
     py.Py_INCREF(py.Py_None);
     return py.Py_None;
@@ -123,7 +146,7 @@ pub export fn PyInit_generator() ?*py.PyObject {
     const m = py.PyModule_Create(@constCast(&generator_module));
     if (m == null) return null;
 
-    generator_error = py.PyErr_NewException("spam.error", null, null);
+    generator_error = py.PyErr_NewException("generator.error", null, null);
     py.Py_XINCREF(generator_error);
     if (py.PyModule_AddObject(m, "error", generator_error) < 0) {
         py.Py_XDECREF(generator_error);
@@ -141,6 +164,7 @@ pub export fn PyInit_generator() ?*py.PyObject {
     np = import_numpy() catch std.debug.panic("cannot import numpy", .{});
 
     arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    global_arena = arena.allocator();
 
     return m;
 }

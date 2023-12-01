@@ -168,7 +168,10 @@ ontology = ontology.with_columns(
     .otherwise(pl.col('parent').str.replace('.', '', literal=True).fill_null(pl.lit(ontology_root_name))),
 )
 
-ontology = ontology.join(icd9_codes, on='icd_code', how='outer').filter(pl.col('icd_code').is_null())
+ontology = ontology.join(icd9_codes, on='icd_code', how='outer').filter(~pl.col('icd_code').is_null())
+
+# this assigns root as parent of NoDx
+ontology = ontology.with_columns(pl.col('parent').fill_null(pl.lit(ontology_root_name)))
 
 uncoded = ontology.filter(pl.col('icd9_id').is_null())
 first_new_id = icd9_codes['icd9_id'].max() + 1
@@ -198,10 +201,10 @@ ccs_path       = os.path.join(output_prefix, output_ccs)
 icd9_path      = os.path.join(output_prefix, output_icd)
 ontology_path  = os.path.join(output_prefix, output_ontology)
 
-print(f'diagnoses path is: { diagnoses_path}')
-print(f'ccs path is:       { ccs_path}')
-print(f'icd9 path is:      { icd9_path}')
-print(f'ontology path is:  { ontology_path}')
+print(f'diagnoses path is: {diagnoses_path}')
+print(f'ccs path is:       {ccs_path}')
+print(f'icd9 path is:      {icd9_path}')
+print(f'ontology path is:  {ontology_path}')
 
 diagnoses .write_parquet(diagnoses_path)
 ccs_codes .write_parquet(ccs_path)
