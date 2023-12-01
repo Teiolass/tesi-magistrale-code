@@ -37,7 +37,6 @@ diagnoses = diagnoses.with_columns (
     visit_count = col('hadm_id').unique().count().over('subject_id')
 ).filter(col('visit_count') > 1)
 
-
 icd_conv = icd_conv.lazy().select (
     col('icd10cm'),
     col('icd9cm').first().over('icd10cm') # @todo maybe we can have a better strategy
@@ -68,7 +67,7 @@ diagnoses = (
         how = 'left'
     )
     .with_columns (
-        ccs = col('ccs').fill_null(pl.lit(0)), # @todo this is a lazy way to deal with null values
+        ccs      = col('ccs'     ).fill_null(pl.lit(0)), # @todo this is a lazy way to deal with null values
         icd_code = col('icd_code').fill_null(pl.lit('NoDx'))
     )
 ).unique()
@@ -149,7 +148,6 @@ ontology = ontology.lazy().select(
     parent   = remove_prefixes(pl.col('Parents' ), ontology_prefixes),
 ).collect()
 
-
 diagnoses_type = ontology.filter(pl.col('parent').str.starts_with('http') & (pl.col('label') != 'PROCEDURES'))['icd_code']
 
 num_rows = 0
@@ -167,10 +165,10 @@ ontology = ontology.with_columns(
         pl.col('parent').str.starts_with('http') 
     )
     .then(pl.lit(ontology_root_name))
-    .otherwise(pl.col('parent').str.replace('.', '', literal=True)),
+    .otherwise(pl.col('parent').str.replace('.', '', literal=True).fill_null(pl.lit(ontology_root_name))),
 )
 
-ontology = ontology.join(icd9_codes, on='icd_code', how='outer')
+ontology = ontology.join(icd9_codes, on='icd_code', how='outer').filter(pl.col('icd_code').is_null())
 
 uncoded = ontology.filter(pl.col('icd9_id').is_null())
 first_new_id = icd9_codes['icd9_id'].max() + 1

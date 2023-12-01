@@ -450,6 +450,3 @@ if __name__ == '__main__':
     txt = '    '.join(txt)
     nice_print(txt)
 
-
-
-
