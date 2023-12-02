@@ -158,7 +158,6 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         py.PyErr_SetString(generator_error, "Error while parsing patient");
         return null;
     };
-    _ = patient;
 
     const dataset = blk: {
         var dataset = allocator.alloc([][]u32, list_len) catch return null;
@@ -173,7 +172,8 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         }
         break :blk dataset;
     };
-    _ = dataset;
+
+    find_neighbours(patient, dataset, ontology);
 
     py.Py_INCREF(py.Py_None);
     return py.Py_None;
@@ -295,6 +295,67 @@ fn get_genealogy(id: u32, _ontology: []u32) struct { [genealogy_max_size]u32, us
         } else break;
     }
     return .{ res, it };
+}
+
+fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
+    var sum: f32 = 0;
+    for (v1) |c1| {
+        var best = std.math.floatMax(f32);
+        for (v2) |c2| {
+            const dist = compute_c2c(c1, c2, _ontology);
+            best = @min(best, dist);
+        }
+        sum += best;
+    }
+    return sum;
+}
+
+fn compute_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
+    const x = asymmetrical_v2v(v1, v2, _ontology);
+    const y = asymmetrical_v2v(v2, v1, _ontology);
+    return 0.5 * (x + y);
+}
+
+fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32) f32 {
+    var table = std.heap.page_allocator.alloc(f32, p1.len * p2.len) catch @panic("error with allocation");
+    defer std.heap.page_allocator.free(table);
+
+    const w = p1.len;
+
+    for (0..p1.len) |it| {
+        for (0..p2.len) |jt| {
+            table[jt * w + it] = std.math.floatMax(f32);
+        }
+    }
+
+    for (0..p1.len) |it| {
+        for (0..p2.len) |jt| {
+            const cost = compute_v2v(p1[it], p2[jt], _ontology);
+            const in_cost = if (it > 0) {
+                break table[jt * w + it - 1];
+            } else {
+                break 0;
+            };
+            const del_cost = if (jt > 0) {
+                break table[(jt - 1) * w + it];
+            } else {
+                break 0;
+            };
+            const edit_cost = if (it > 0 and jt > 0) {
+                break table[(jt - 1) * w + it - 1];
+            } else {
+                break 0;
+            };
+            table[jt * w + it] = cost + @min(in_cost, del_cost, edit_cost);
+        }
+    }
+    return table[table.len - 1];
+}
+
+fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: []u32) void {
+    _ = _ontology;
+    _ = dataset;
+    _ = patient;
 }
 
 var generator_module = py.PyModuleDef{
