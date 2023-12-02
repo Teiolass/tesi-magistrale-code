@@ -50,7 +50,7 @@ pub const Descr = extern struct {
     type: u8,
     byteorder: u8,
     flags: u8,
-    type_num: i64,
+    type_num: Types,
     elsize: i64,
     alignment: i64,
     _arr_descr: ?*Array_Descr,
