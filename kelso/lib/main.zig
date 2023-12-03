@@ -1,7 +1,5 @@
-const std = @import("std");
-const py = @import("python.zig");
-
-const Np = @import("numpy_data.zig");
+// this is chosen looking at the input ontology
+const genealogy_max_size: usize = 12;
 
 var np: Np = undefined;
 
@@ -24,12 +22,6 @@ const module_methods = [_]py.PyMethodDef{
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "inputs a patient (ids + count), a list of patients (list of ids + list of counts) and a neighborhood size",
     },
-    .{
-        .ml_name = "test",
-        .ml_meth = my_test,
-        .ml_flags = py.METH_VARARGS,
-        .ml_doc = "",
-    },
     .{ // this one is just a sentinel
         .ml_name = null,
         .ml_meth = null,
@@ -38,79 +30,7 @@ const module_methods = [_]py.PyMethodDef{
     },
 };
 
-export fn my_test(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
-    _ = self_obj;
-    var arg: ?*py.PyObject = undefined;
-
-    if (py.PyArg_ParseTuple(args, "O", &arg) == 0) return null;
-
-    if (py.PyList_Check(arg) == 0) {
-        py.PyErr_SetString(generator_error, "we were expecting a list...");
-        return null;
-    }
-    const list: *py.PyListObject = @ptrCast(arg orelse return null);
-    const size: usize = @intCast(py.PyList_GET_SIZE(@ptrCast(list)));
-
-    for (0..size) |it| {
-        const item = py.PyList_GetItem(@ptrCast(list), @intCast(it));
-        const val = py.PyLong_AsLong(item);
-        std.debug.print("item {}: {}\n", .{ it, val });
-    }
-
-    std.debug.print("list size: {}\n", .{size});
-
-    py.Py_INCREF(py.Py_None);
-    return py.Py_None;
-}
-
-// useful link: https://stackoverflow.com/questions/50668981/how-to-return-a-list-of-ints-in-python-c-api-extension-with-pylist
-
-// export fn spam_system(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
-//     _ = self_obj;
-//     var command: [*c]u8 = undefined;
-//     if (py.PyArg_ParseTuple(args, "s", &command) == 0) return null;
-//     const sts = py.system(command);
-//     if (sts < 0) {
-//         py.PyErr_SetString(spam_error, "System command failed!");
-//         return null;
-//     }
-//     return py.PyLong_FromLong(sts);
-// }
-
-// export fn np_ex(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
-//     _ = self_obj;
-//     var arg1: ?*py.PyObject = undefined;
-
-//     if (py.PyArg_ParseTuple(args, "O", &arg1) == 0) return null;
-//     const _arr = np.from_otf(arg1, Np.Types.LONG, Np.Array_Flags.INOUT_ARRAY2) orelse return null;
-//     const arr: *Np.Array_Obj = @ptrCast(_arr);
-//     std.debug.print("num_dimensions: {}\n", .{arr.nd});
-
-//     const data: [*]i64 = @ptrCast(@alignCast(arr.data));
-//     data[0] = 9;
-
-//     py.Py_INCREF(py.Py_None);
-//     return py.Py_None;
-// }
-
-// export fn get_nines(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
-//     _ = self_obj;
-//     const second_dimension_size = 4;
-//     var arr_size: i64 = undefined;
-//     if (py.PyArg_ParseTuple(args, "l", &arr_size) == 0) return null;
-
-//     var dims = [_]isize{ arr_size, second_dimension_size };
-//     var obj = np.simple_new(2, &dims, Np.Types.FLOAT) orelse return null;
-//     {
-//         var arr: *Np.Array_Obj = @ptrCast(obj);
-//         var data: [*]f32 = @ptrCast(@alignCast(arr.data));
-//         const num_els: usize = @intCast(arr_size * second_dimension_size);
-//         for (0..num_els) |it| {
-//             data[it] = 9.9;
-//         }
-//     }
-//     return obj;
-// }
+// useful link for c apis: https://stackoverflow.com/questions/50668981/how-to-return-a-list-of-ints-in-python-c-api-extension-with-pylist
 
 var ontology: []u32 = undefined;
 
@@ -187,6 +107,7 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
 
     find_neighbours(patient, dataset, ontology, result_data);
 
+    // @debug
     // py.Py_INCREF(py.Py_None);
     // return py.Py_None;
     return result_array;
@@ -274,9 +195,6 @@ fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem
     return patient;
 }
 
-// this is chosen looking at the input ontology
-const genealogy_max_size: usize = 12;
-
 fn compute_c2c(id_1: u32, id_2: u32, _ontology: []u32) f32 {
     if (id_1 == id_2) return 0;
 
@@ -291,6 +209,7 @@ fn compute_c2c(id_1: u32, id_2: u32, _ontology: []u32) f32 {
     var cursor_1 = root_1;
     var cursor_2 = root_2;
     while (genealogy_1[cursor_1] == genealogy_2[cursor_2]) {
+        if (cursor_1 == 0 or cursor_2 == 0) break;
         cursor_1 -= 1;
         cursor_2 -= 1;
     }
@@ -298,7 +217,15 @@ fn compute_c2c(id_1: u32, id_2: u32, _ontology: []u32) f32 {
     cursor_2 = @min(cursor_2 + 1, root_2);
 
     const d_lr_doubled: f32 = @floatFromInt(2 * (root_1 - cursor_1));
-    const dist = d_lr_doubled / (@as(f32, @floatFromInt(cursor_1 + cursor_2)) + d_lr_doubled);
+    const dist = 1.0 - d_lr_doubled / (@as(f32, @floatFromInt(cursor_1 + cursor_2)) + d_lr_doubled);
+
+    // @debug
+    // if (dist < 1e-4) {
+    //     std.debug.print("\n", .{});
+    //     std.debug.print("id_1:{d: <8}id_2:{d: <8}\n", .{ id_1, id_2 });
+    //     std.debug.print("genealogy_1 (root {d: <2} cursor {d: <2}): {any}\n", .{ root_1, cursor_1, genealogy_1 });
+    //     std.debug.print("genealogy_1 (root {d: <2} cursor {d: <2}): {any}\n", .{ root_2, cursor_2, genealogy_2 });
+    // }
 
     return dist;
 }
@@ -338,13 +265,12 @@ fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
 fn compute_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
     const x = asymmetrical_v2v(v1, v2, _ontology);
     const y = asymmetrical_v2v(v2, v1, _ontology);
-    return 0.5 * (x + y);
+    return x + y;
 }
 
-fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32) f32 {
+fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32, allocator: std.mem.Allocator) f32 {
     // @todo we dont really need all these syscalls
-    var table = std.heap.page_allocator.alloc(f32, p1.len * p2.len) catch @panic("error with allocation");
-    defer std.heap.page_allocator.free(table);
+    var table = allocator.alloc(f32, p1.len * p2.len) catch @panic("error with allocation");
 
     const w = p1.len;
 
@@ -373,14 +299,29 @@ fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32) f32 {
         }
     }
 
+    // @debug
+    // std.debug.print("\ntable {}x{}\n", .{ p1.len, p2.len });
+    // for (0..p2.len) |jt| {
+    //     for (0..p1.len) |it| {
+    //         std.debug.print("{d:.1}  ", .{table[jt * w + it]});
+    //     }
+    //     std.debug.print("\n", .{});
+    // }
+    // std.debug.print("\n", .{});
+
     return table[table.len - 1];
 }
 
 /// result is a preallocated array for the result of the same size of dataset
 fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: []u32, result: []f32) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     for (dataset, 0..) |d_patient, it| {
-        const dist = compute_p2p(patient, d_patient, _ontology);
+        const dist = compute_p2p(patient, d_patient, _ontology, allocator);
         result[it] = dist;
+        _ = arena.reset(.retain_capacity);
     }
 }
 
@@ -442,3 +383,8 @@ fn import_numpy() !Np {
     };
     return Np.from_api(PyArray_api);
 }
+
+const std = @import("std");
+const py = @import("python.zig");
+
+const Np = @import("numpy_data.zig");
