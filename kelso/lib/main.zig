@@ -173,10 +173,23 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         break :blk dataset;
     };
 
-    find_neighbours(patient, dataset, ontology);
+    var result_data: []f32 = undefined;
+    const result_array = blk: {
+        var dimensions = [_]isize{@intCast(dataset.len)};
+        var obj = np.simple_new(dimensions.len, &dimensions, Np.Types.FLOAT) orelse {
+            py.PyErr_SetString(generator_error, "Failed while creating result array");
+            return null;
+        };
+        var arr: *Np.Array_Obj = @ptrCast(obj);
+        result_data = @as([*]f32, @ptrCast(@alignCast(arr.data)))[0..dataset.len];
+        break :blk obj;
+    };
 
-    py.Py_INCREF(py.Py_None);
-    return py.Py_None;
+    find_neighbours(patient, dataset, ontology, result_data);
+
+    // py.Py_INCREF(py.Py_None);
+    // return py.Py_None;
+    return result_array;
 }
 
 export fn set_ontology(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
@@ -238,8 +251,10 @@ fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem
         const _patient_cc = np.from_otf(counts, Np.Types.UINT, Np.Array_Flags.IN_ARRAY);
         break :blk @as(*Np.Array_Obj, @ptrCast(_patient_cc orelse return null));
     };
+
     if (patient_id.nd != 1) return null;
     if (patient_cc.nd != 1) return null;
+
     const num_visits: usize = @intCast(patient_cc.dimensions[0]);
     var patient = allocator.alloc([]u32, num_visits) catch return null;
 
@@ -253,6 +268,9 @@ fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem
         cursor += len;
     }
 
+    const num_codes: usize = @intCast(patient_id.dimensions[0]);
+    if (cursor != num_codes) return null;
+
     return patient;
 }
 
@@ -260,6 +278,8 @@ fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem
 const genealogy_max_size: usize = 12;
 
 fn compute_c2c(id_1: u32, id_2: u32, _ontology: []u32) f32 {
+    if (id_1 == id_2) return 0;
+
     const res_1 = get_genealogy(id_1, _ontology);
     const res_2 = get_genealogy(id_2, _ontology);
 
@@ -303,6 +323,11 @@ fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
         var best = std.math.floatMax(f32);
         for (v2) |c2| {
             const dist = compute_c2c(c1, c2, _ontology);
+            // const dist = blk: {
+            //     var x: f32 = 1.0;
+            //     if (c1 == c2) x = 0.0;
+            //     break :blk x;
+            // };
             best = @min(best, dist);
         }
         sum += best;
@@ -317,6 +342,7 @@ fn compute_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
 }
 
 fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32) f32 {
+    // @todo we dont really need all these syscalls
     var table = std.heap.page_allocator.alloc(f32, p1.len * p2.len) catch @panic("error with allocation");
     defer std.heap.page_allocator.free(table);
 
@@ -324,38 +350,38 @@ fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32) f32 {
 
     for (0..p1.len) |it| {
         for (0..p2.len) |jt| {
-            table[jt * w + it] = std.math.floatMax(f32);
-        }
-    }
-
-    for (0..p1.len) |it| {
-        for (0..p2.len) |jt| {
             const cost = compute_v2v(p1[it], p2[jt], _ontology);
-            const in_cost = if (it > 0) {
-                break table[jt * w + it - 1];
+            var in_cost: f32 = std.math.floatMax(f32);
+            var del_cost: f32 = std.math.floatMax(f32);
+            var edit_cost: f32 = std.math.floatMax(f32);
+
+            if (it > 0) {
+                in_cost = table[jt * w + it - 1];
+                if (jt > 0) {
+                    del_cost = table[(jt - 1) * w + it];
+                    edit_cost = table[(jt - 1) * w + it - 1];
+                }
             } else {
-                break 0;
-            };
-            const del_cost = if (jt > 0) {
-                break table[(jt - 1) * w + it];
-            } else {
-                break 0;
-            };
-            const edit_cost = if (it > 0 and jt > 0) {
-                break table[(jt - 1) * w + it - 1];
-            } else {
-                break 0;
-            };
+                if (jt > 0) {
+                    del_cost = table[(jt - 1) * w + it];
+                } else {
+                    edit_cost = 0;
+                }
+            }
+
             table[jt * w + it] = cost + @min(in_cost, del_cost, edit_cost);
         }
     }
+
     return table[table.len - 1];
 }
 
-fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: []u32) void {
-    _ = _ontology;
-    _ = dataset;
-    _ = patient;
+/// result is a preallocated array for the result of the same size of dataset
+fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: []u32, result: []f32) void {
+    for (dataset, 0..) |d_patient, it| {
+        const dist = compute_p2p(patient, d_patient, _ontology);
+        result[it] = dist;
+    }
 }
 
 var generator_module = py.PyModuleDef{

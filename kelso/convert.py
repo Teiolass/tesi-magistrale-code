@@ -94,6 +94,7 @@ print(
 )
 indexes = pl.DataFrame({'icd9_id': range(1, icd9_codes.shape[0]+1)}, schema={'icd9_id':pl.UInt32})
 icd9_codes = pl.concat([icd9_codes, indexes], how='horizontal')
+icd9_codes = icd9_codes.with_columns(icd9_id=pl.when(pl.col('icd_code') == 'NoDx').then(pl.lit(0)).otherwise(pl.col('icd9_id')))
 diagnoses = (
     diagnoses
     .join (
