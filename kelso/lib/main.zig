@@ -245,16 +245,17 @@ fn get_genealogy(id: u32, _ontology: []u32) struct { [genealogy_max_size]u32, us
 }
 
 fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
+    _ = _ontology;
     var sum: f32 = 0;
     for (v1) |c1| {
         var best = std.math.floatMax(f32);
         for (v2) |c2| {
-            const dist = compute_c2c(c1, c2, _ontology);
-            // const dist = blk: {
-            //     var x: f32 = 1.0;
-            //     if (c1 == c2) x = 0.0;
-            //     break :blk x;
-            // };
+            // const dist = compute_c2c(c1, c2, _ontology);
+            const dist = blk: {
+                var x: f32 = 1.0;
+                if (c1 == c2) x = 0.0;
+                break :blk x;
+            };
             best = @min(best, dist);
         }
         sum += best;
@@ -265,11 +266,11 @@ fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
 fn compute_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
     const x = asymmetrical_v2v(v1, v2, _ontology);
     const y = asymmetrical_v2v(v2, v1, _ontology);
-    return x + y;
+    // return x + y;
+    return @max(x, y);
 }
 
 fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32, allocator: std.mem.Allocator) f32 {
-    // @todo we dont really need all these syscalls
     var table = allocator.alloc(f32, p1.len * p2.len) catch @panic("error with allocation");
 
     const w = p1.len;

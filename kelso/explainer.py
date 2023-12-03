@@ -6,10 +6,29 @@ import lib.generator as gen
 ontology_path  = 'data/processed/ontology.parquet'
 diagnoses_path = 'data/processed/diagnoses.parquet'
 
+def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
+    codes = pl.DataFrame({'icd9_id':ids})
+    codes = codes.join(ontology, how='left', on='icd9_id')
+
+    cursor = 0
+    for it in range(cnt.shape[0]):
+        length = cnt[it]
+        lines = []
+        for jt in range(cursor, cursor+length):
+            x = f'[{codes["icd_code"][jt]:}]' 
+            txt  = f'    {x: <10}'
+            txt += f'{codes["label"][jt]}'
+            lines.append(txt)
+        txt = '\n'.join(lines)
+        print(f'visit {it+1}')
+        print(txt)
+        cursor += length
+            
+
 ontology  = pl.read_parquet(ontology_path)
 diagnoses = pl.read_parquet(diagnoses_path)
 
-diagnoses = diagnoses.head(80)
+diagnoses = diagnoses.head(20_000)
 
 codes  = list(diagnoses['icd9_id'].to_numpy())
 counts = list(diagnoses['count'  ].to_numpy())
@@ -17,12 +36,13 @@ counts = list(diagnoses['count'  ].to_numpy())
 ontology_array = ontology[['icd9_id', 'parent_id']].to_numpy()
 gen.set_ontology(ontology_array)
 
-result = gen.find_neighbours(codes[0], counts[0], codes[1:], counts[1:], 2);
+first = 100
+reference = 0
+result = gen.find_neighbours(codes[reference], counts[reference], codes[first:], counts[first:], 2);
+best = np.argmin(result)
 
-# example_p_cod = np.array([1, 2, 3, 4, 5, 6], dtype=np.uint32)
-# example_p_cnt = np.array([1, 1, 1, 1, 1, 1], dtype=np.uint32)
-# example_c_cod = np.array([2, 4, 5], dtype=np.uint32)
-# example_c_cnt = np.array([1, 1, 1], dtype=np.uint32)
-# result = gen.find_neighbours(example_p_cod, example_p_cnt, [example_c_cod], [example_c_cnt], 0)
+print('='*5 + '  PATIENT 1  ' + '='*5)
+print_patient(codes[reference], counts[reference], ontology)
+print('='*5 + '  PATIENT 2  ' + '='*5)
+print_patient(codes[best+first], counts[best+first], ontology)
 
-print(result)
