@@ -28,7 +28,7 @@ def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
 ontology  = pl.read_parquet(ontology_path)
 diagnoses = pl.read_parquet(diagnoses_path)
 
-diagnoses = diagnoses.head(80_000)
+diagnoses = diagnoses.head(100_000)
 
 unique_codes = diagnoses['icd9_id'].explode().unique().to_numpy()
 

@@ -1,5 +1,6 @@
 // this is chosen looking at the input ontology
 const genealogy_max_size: usize = 12;
+const num_jobs: usize = 24;
 
 var np: Np = undefined;
 
@@ -161,7 +162,7 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         tree = data[0 .. 2 * size];
     }
 
-    const leaf_indices = blk: {
+    const leaf_indices: []u32 = blk: {
         const t: [*]u32 = @ptrCast(@alignCast(arr2.data));
         const _size: usize = @intCast(arr2.dimensions[0]); // @todo check nd
         break :blk t[0.._size];
@@ -191,11 +192,66 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         it.* = std.math.nan(f32);
     }
 
-    for (leaf_indices, 0..) |it, it_index| {
-        for (leaf_indices[0 .. it_index + 1]) |jt| {
-            const dist = compute_c2c(it, jt, _ontology_tree);
-            ontology.get_mut(it, jt).* = dist;
-            ontology.get_mut(jt, it).* = dist;
+    if (comptime num_jobs == 1) {
+        for (leaf_indices, 0..) |it, it_index| {
+            for (leaf_indices[0 .. it_index + 1]) |jt| {
+                const dist = compute_c2c(it, jt, _ontology_tree);
+                ontology.get_mut(it, jt).* = dist;
+                ontology.get_mut(jt, it).* = dist;
+            }
+        }
+    } else {
+        const Thread_Data = struct {
+            ontology_tree: []u32,
+            leaf_indices: []u32,
+            ontology: Ontology,
+            start: usize,
+            len: usize,
+
+            const Self = @This();
+
+            pub fn job(self: Self) void {
+                for (self.leaf_indices[self.start .. self.start + self.len], 0..) |it, it_index| {
+                    for (self.leaf_indices[0 .. self.start + it_index + 1]) |jt| {
+                        const dist = compute_c2c(it, jt, self.ontology_tree);
+                        ontology.get_mut(it, jt).* = dist;
+                        ontology.get_mut(jt, it).* = dist;
+                    }
+                }
+            }
+        };
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const spawn_config = std.Thread.SpawnConfig{ .allocator = allocator };
+
+        const base_size = leaf_indices.len / num_jobs;
+        var remainder = leaf_indices.len % num_jobs;
+
+        var threads = allocator.alloc(std.Thread, num_jobs) catch @panic("error in allocation");
+
+        var cursor: usize = 0;
+        for (threads) |*thread| {
+            var true_size = base_size;
+            if (remainder > 0) {
+                true_size += 1;
+                remainder -= 1;
+            }
+            const thread_data = Thread_Data{
+                .ontology_tree = _ontology_tree,
+                .leaf_indices = leaf_indices,
+                .ontology = ontology,
+                .start = cursor,
+                .len = true_size,
+            };
+            cursor += true_size;
+            thread.* = std.Thread.spawn(spawn_config, Thread_Data.job, .{thread_data}) catch @panic("cannot create thread");
+        }
+
+        for (threads) |thread| {
+            thread.join();
         }
     }
 
@@ -383,12 +439,12 @@ var generator_module = py.PyModuleDef{
 };
 
 pub export fn PyInit_generator() ?*py.PyObject {
-    const m = py.PyModule_Create(@constCast(&generator_module));
-    if (m == null) return null;
+    const module = py.PyModule_Create(@constCast(&generator_module));
+    if (module == null) return null;
 
     generator_error = py.PyErr_NewException("generator.error", null, null);
     py.Py_XINCREF(generator_error);
-    if (py.PyModule_AddObject(m, "error", generator_error) < 0) {
+    if (py.PyModule_AddObject(module, "error", generator_error) < 0) {
         py.Py_XDECREF(generator_error);
         {
             const tmp = generator_error;
@@ -397,7 +453,7 @@ pub export fn PyInit_generator() ?*py.PyObject {
                 py.Py_DECREF(tmp);
             }
         }
-        py.Py_DECREF(m);
+        py.Py_DECREF(module);
         return null;
     }
 
@@ -406,7 +462,19 @@ pub export fn PyInit_generator() ?*py.PyObject {
     _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     global_arena = _arena.allocator();
 
-    return m;
+    {
+        // @bug this numbers are dependent on the system they are running in
+        // and they should be initialized in the _start function
+        std.os.linux.tls.tls_image.alloc_size = 48;
+        std.os.linux.tls.tls_image.alloc_align = 8;
+        std.os.linux.tls.tls_image.tcb_offset = 16;
+        std.os.linux.tls.tls_image.dtv_offset = 32;
+        std.os.linux.tls.tls_image.data_offset = 0;
+        std.os.linux.tls.tls_image.data_size = 16;
+        std.os.linux.tls.tls_image.gdt_entry_number = 18446744073709551615;
+    }
+
+    return module;
 }
 
 fn import_numpy() !Np {
