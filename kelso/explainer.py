@@ -28,13 +28,15 @@ def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
 ontology  = pl.read_parquet(ontology_path)
 diagnoses = pl.read_parquet(diagnoses_path)
 
-diagnoses = diagnoses.head(20_000)
+diagnoses = diagnoses.head(80_000)
+
+unique_codes = diagnoses['icd9_id'].explode().unique().to_numpy()
 
 codes  = list(diagnoses['icd9_id'].to_numpy())
 counts = list(diagnoses['count'  ].to_numpy())
 
 ontology_array = ontology[['icd9_id', 'parent_id']].to_numpy()
-gen.set_ontology(ontology_array)
+gen.create_c2c_table(ontology_array, unique_codes)
 
 first = 100
 reference = 0

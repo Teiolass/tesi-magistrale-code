@@ -11,8 +11,8 @@ var generator_error: ?*py.PyObject = null;
 // This python module will export three functions
 const module_methods = [_]py.PyMethodDef{
     .{
-        .ml_name = "set_ontology",
-        .ml_meth = set_ontology,
+        .ml_name = "create_c2c_table",
+        .ml_meth = create_c2c_table,
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "",
     },
@@ -32,7 +32,7 @@ const module_methods = [_]py.PyMethodDef{
 
 // useful link for c apis: https://stackoverflow.com/questions/50668981/how-to-return-a-list-of-ints-in-python-c-api-extension-with-pylist
 
-var ontology: []u32 = undefined;
+var ontology: Ontology = undefined;
 
 /// inputs a patient (ids + count), a list of patients (list of ids + list of counts) and a neighborhood size
 export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
@@ -113,13 +113,30 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
     return result_array;
 }
 
-export fn set_ontology(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
+const Ontology = struct {
+    table: []f32,
+    w: usize,
+
+    inline fn get(self: Ontology, c1: u32, c2: u32) f32 {
+        return self.table[c1 * self.w + c2];
+    }
+
+    inline fn get_mut(self: Ontology, c1: u32, c2: u32) *f32 {
+        return &self.table[c1 * self.w + c2];
+    }
+};
+
+export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
     _ = self_obj;
     var arg1: ?*py.PyObject = undefined;
+    var arg2: ?*py.PyObject = undefined;
 
-    if (py.PyArg_ParseTuple(args, "O", &arg1) == 0) return null;
+    if (py.PyArg_ParseTuple(args, "OO", &arg1, &arg2) == 0) return null;
     const _arr = np.from_otf(arg1, Np.Types.UINT, Np.Array_Flags.IN_ARRAY) orelse return null;
     const arr: *Np.Array_Obj = @ptrCast(_arr);
+
+    const _arr2 = np.from_otf(arg2, Np.Types.UINT, Np.Array_Flags.IN_ARRAY) orelse return null;
+    const arr2: *Np.Array_Obj = @ptrCast(_arr2);
 
     var size: usize = undefined;
     var tree: []u32 = undefined;
@@ -144,6 +161,13 @@ export fn set_ontology(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObje
         tree = data[0 .. 2 * size];
     }
 
+    const leaf_indices = blk: {
+        const t: [*]u32 = @ptrCast(@alignCast(arr2.data));
+        const _size: usize = @intCast(arr2.dimensions[0]); // @todo check nd
+        break :blk t[0.._size];
+    };
+    const max_leaf_index = std.mem.max(u32, leaf_indices) + 1;
+
     const max_id = blk: {
         var max: u32 = 0;
         for (0..size) |it| {
@@ -152,11 +176,27 @@ export fn set_ontology(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObje
         break :blk max;
     };
 
-    ontology = std.heap.page_allocator.alloc(u32, max_id + 1) catch return null;
+    var _ontology_tree = std.heap.page_allocator.alloc(u32, max_id + 1) catch return null;
+    defer std.heap.page_allocator.free(_ontology_tree);
     for (0..size) |it| {
         const child = tree[2 * it];
         const parent = tree[2 * it + 1];
-        ontology[child] = parent;
+        _ontology_tree[child] = parent;
+    }
+
+    ontology = std.mem.zeroes(Ontology);
+    ontology.table = global_arena.alloc(f32, max_leaf_index * max_leaf_index) catch @panic("Alloc error");
+    ontology.w = max_leaf_index;
+    for (ontology.table) |*it| {
+        it.* = std.math.nan(f32);
+    }
+
+    for (leaf_indices, 0..) |it, it_index| {
+        for (leaf_indices[0 .. it_index + 1]) |jt| {
+            const dist = compute_c2c(it, jt, _ontology_tree);
+            ontology.get_mut(it, jt).* = dist;
+            ontology.get_mut(jt, it).* = dist;
+        }
     }
 
     py.Py_INCREF(py.Py_None);
@@ -195,11 +235,11 @@ fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem
     return patient;
 }
 
-fn compute_c2c(id_1: u32, id_2: u32, _ontology: []u32) f32 {
+fn compute_c2c(id_1: u32, id_2: u32, _ontology_tree: []u32) f32 {
     if (id_1 == id_2) return 0;
 
-    const res_1 = get_genealogy(id_1, _ontology);
-    const res_2 = get_genealogy(id_2, _ontology);
+    const res_1 = get_genealogy(id_1, _ontology_tree);
+    const res_2 = get_genealogy(id_2, _ontology_tree);
 
     const genealogy_1 = res_1[0];
     const genealogy_2 = res_2[0];
@@ -230,12 +270,12 @@ fn compute_c2c(id_1: u32, id_2: u32, _ontology: []u32) f32 {
     return dist;
 }
 
-fn get_genealogy(id: u32, _ontology: []u32) struct { [genealogy_max_size]u32, usize } {
+fn get_genealogy(id: u32, _ontology_tree: []u32) struct { [genealogy_max_size]u32, usize } {
     var res = std.mem.zeroes([genealogy_max_size]u32);
     res[0] = id;
     var it: usize = 0;
     while (true) {
-        const parent = _ontology[res[it]];
+        const parent = _ontology_tree[res[it]];
         if (parent != res[it]) {
             it += 1;
             res[it] = parent;
@@ -244,18 +284,17 @@ fn get_genealogy(id: u32, _ontology: []u32) struct { [genealogy_max_size]u32, us
     return .{ res, it };
 }
 
-fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
-    _ = _ontology;
+fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: Ontology) f32 {
     var sum: f32 = 0;
     for (v1) |c1| {
         var best = std.math.floatMax(f32);
         for (v2) |c2| {
-            // const dist = compute_c2c(c1, c2, _ontology);
-            const dist = blk: {
-                var x: f32 = 1.0;
-                if (c1 == c2) x = 0.0;
-                break :blk x;
-            };
+            const dist = _ontology.get(c1, c2);
+            // const dist = blk: {
+            //     var x: f32 = 1.0;
+            //     if (c1 == c2) x = 0.0;
+            //     break :blk x;
+            // };
             best = @min(best, dist);
         }
         sum += best;
@@ -263,14 +302,14 @@ fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
     return sum;
 }
 
-fn compute_v2v(v1: []u32, v2: []u32, _ontology: []u32) f32 {
+fn compute_v2v(v1: []u32, v2: []u32, _ontology: Ontology) f32 {
     const x = asymmetrical_v2v(v1, v2, _ontology);
     const y = asymmetrical_v2v(v2, v1, _ontology);
     // return x + y;
     return @max(x, y);
 }
 
-fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32, allocator: std.mem.Allocator) f32 {
+fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: Ontology, allocator: std.mem.Allocator) f32 {
     var table = allocator.alloc(f32, p1.len * p2.len) catch @panic("error with allocation");
 
     const w = p1.len;
@@ -314,7 +353,7 @@ fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: []u32, allocator: std.mem.Al
 }
 
 /// result is a preallocated array for the result of the same size of dataset
-fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: []u32, result: []f32) void {
+fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: Ontology, result: []f32) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
