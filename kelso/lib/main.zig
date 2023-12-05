@@ -517,18 +517,6 @@ pub export fn PyInit_generator() ?*py.PyObject {
     _arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     global_arena = _arena.allocator();
 
-    {
-        // @bug this numbers are dependent on the system they are running in
-        // and they should be initialized in the _start function
-        std.os.linux.tls.tls_image.alloc_size = 48;
-        std.os.linux.tls.tls_image.alloc_align = 8;
-        std.os.linux.tls.tls_image.tcb_offset = 16;
-        std.os.linux.tls.tls_image.dtv_offset = 32;
-        std.os.linux.tls.tls_image.data_offset = 0;
-        std.os.linux.tls.tls_image.data_size = 16;
-        std.os.linux.tls.tls_image.gdt_entry_number = 18446744073709551615;
-    }
-
     return module;
 }
 
