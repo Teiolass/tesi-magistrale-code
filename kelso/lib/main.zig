@@ -1,6 +1,6 @@
 // this is chosen looking at the input ontology
 const genealogy_max_size: usize = 12;
-const num_jobs: usize = 24;
+const num_jobs: usize = 1;
 
 var np: Np = undefined;
 
@@ -211,6 +211,7 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
             const Self = @This();
 
             pub fn job(self: Self) void {
+                std.debug.print("hey im working!\n", .{});
                 for (self.leaf_indices[self.start .. self.start + self.len], 0..) |it, it_index| {
                     for (self.leaf_indices[0 .. self.start + it_index + 1]) |jt| {
                         const dist = compute_c2c(it, jt, self.ontology_tree);
@@ -410,14 +411,57 @@ fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: Ontology, allocator: std.mem
 
 /// result is a preallocated array for the result of the same size of dataset
 fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: Ontology, result: []f32) void {
+    const Thread_Data = struct {
+        ontology: Ontology,
+        dataset: [][][]u32,
+        patient: [][]u32,
+        result: []f32,
+        current_index: *usize,
+
+        const Self = @This();
+        const batch_size = 16;
+
+        pub fn job(self: Self) void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+
+            while (true) {
+                const index: usize = @atomicRmw(usize, self.current_index, .Add, Self.batch_size, .Monotonic);
+                if (index >= self.dataset.len) break;
+
+                const index_limit = @min(self.dataset.len, index + batch_size);
+                for (self.dataset[index..index_limit], index..) |d_patient, it| {
+                    const dist = compute_p2p(self.patient, d_patient, self.ontology, allocator);
+                    self.result[it] = dist;
+                    _ = arena.reset(.retain_capacity);
+                }
+            }
+        }
+    };
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    for (dataset, 0..) |d_patient, it| {
-        const dist = compute_p2p(patient, d_patient, _ontology, allocator);
-        result[it] = dist;
-        _ = arena.reset(.retain_capacity);
+    const spawn_config = std.Thread.SpawnConfig{ .allocator = allocator };
+    var threads = allocator.alloc(std.Thread, num_jobs) catch @panic("error in allocation");
+
+    var current_index: usize = 0;
+
+    for (threads) |*thread| {
+        const thread_data = Thread_Data{
+            .ontology = _ontology,
+            .dataset = dataset,
+            .patient = patient,
+            .result = result,
+            .current_index = &current_index,
+        };
+        thread.* = std.Thread.spawn(spawn_config, Thread_Data.job, .{thread_data}) catch @panic("cannot create thread");
+    }
+
+    for (threads) |thread| {
+        thread.join();
     }
 }
 
