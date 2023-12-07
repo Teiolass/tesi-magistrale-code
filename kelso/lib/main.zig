@@ -232,6 +232,7 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
 
         var threads = allocator.alloc(std.Thread, num_jobs) catch @panic("error in allocation");
 
+        // @bug workload is not balanced on the threads
         var cursor: usize = 0;
         for (threads) |*thread| {
             var true_size = base_size;
@@ -476,6 +477,30 @@ fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: Ontology, re
     }
 }
 
+fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, labels: [*]u8, max_label: u32, lambda: f32) void {
+    const data_size = dataset.len;
+    const index = Indexer(2).init(.{ data_size, max_label });
+
+    @memset(encoded[0..index.size], 0);
+    @memset(labels[0..index.size], 0);
+
+    for (dataset, 0..) |patient, it| {
+        var factor = 1;
+        for (1..patient.len) |jt| {
+            defer factor *= lambda;
+
+            const visit_it = patient.len - jt;
+            for (patient[visit_it]) |c| {
+                encoded[index.ix(.{ it, c })] += factor;
+            }
+        }
+
+        for (patient[parse_patient.len - 1]) |c| {
+            labels[index.ix(.{ it, c })] = 1;
+        }
+    }
+}
+
 var generator_module = py.PyModuleDef{
     .m_base = .{
         .ob_base = .{ .ob_refcnt = 1, .ob_type = null },
@@ -539,3 +564,4 @@ const std = @import("std");
 const py = @import("python.zig");
 
 const Np = @import("numpy_data.zig");
+const Indexer = @import("tensor.zig").Indexer;

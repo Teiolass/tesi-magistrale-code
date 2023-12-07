@@ -43,8 +43,8 @@ reference = 0
 result = gen.find_neighbours(codes[reference], counts[reference], codes[first:], counts[first:], 2);
 best = np.argmin(result)
 
-print('='*5 + '  PATIENT 1  ' + '='*5)
-print_patient(codes[reference], counts[reference], ontology)
-print('='*5 + '  PATIENT 2  ' + '='*5)
-print_patient(codes[best+first], counts[best+first], ontology)
+# print('='*5 + '  PATIENT 1  ' + '='*5)
+# print_patient(codes[reference], counts[reference], ontology)
+# print('='*5 + '  PATIENT 2  ' + '='*5)
+# print_patient(codes[best+first], counts[best+first], ontology)
 
