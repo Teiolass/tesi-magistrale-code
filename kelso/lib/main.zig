@@ -53,24 +53,6 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
     const num_neigh: usize = @intCast(_num_neigh);
     _ = num_neigh;
 
-    if (py.PyList_Check(arg3) == 0) {
-        py.PyErr_SetString(generator_error, "Argument 3 should be a list");
-        return null;
-    }
-    if (py.PyList_Check(arg4) == 0) {
-        py.PyErr_SetString(generator_error, "Argument 4 should be a list");
-        return null;
-    }
-
-    const list_len = blk: {
-        const _list_len = py.PyList_GET_SIZE(dataset_codes);
-        if (_list_len != py.PyList_GET_SIZE(dataset_count)) {
-            py.PyErr_SetString(generator_error, "Ids list and count list should have the same size");
-            return null;
-        }
-        break :blk @as(usize, @intCast(_list_len));
-    };
-
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -80,19 +62,7 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         return null;
     };
 
-    const dataset = blk: {
-        var dataset = allocator.alloc([][]u32, list_len) catch return null;
-        for (0..list_len) |it| {
-            const codes_obj = py.PyList_GetItem(dataset_codes, @intCast(it));
-            const count_obj = py.PyList_GetItem(dataset_count, @intCast(it));
-            dataset[it] = parse_patient(codes_obj, count_obj, allocator) orelse {
-                const msg = std.fmt.allocPrintZ(global_arena, "Error while parsing dataset patient {}", .{it}) catch return null;
-                py.PyErr_SetString(generator_error, msg);
-                return null;
-            };
-        }
-        break :blk dataset;
-    };
+    const dataset = parse_list_of_patients(dataset_codes, dataset_count, allocator) orelse return null;
 
     var result_data: []f32 = undefined;
     const result_array = blk: {
@@ -112,6 +82,63 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
     // py.Py_INCREF(py.Py_None);
     // return py.Py_None;
     return result_array;
+}
+
+/// This takes the list of patients to encode (ids and counts) and the max id, then returns their encoded form
+export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
+    _ = self_obj;
+    var arg1: ?*py.PyObject = undefined;
+    var arg2: ?*py.PyObject = undefined;
+    var _max_id: i64 = undefined;
+
+    if (py.PyArg_ParseTuple(args, "OOl", &arg1, &arg2, &_max_id) == 0) return null;
+
+    const max_id: usize = @intCast(_max_id);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const dataset = parse_list_of_patients(arg1, arg2, allocator) orelse return null;
+
+    var encoded_data: [*]f32 = undefined;
+    const encoded_array = blk: {
+        var dimensions = [_]isize{ @intCast(dataset.len), @intCast(max_id) };
+        var obj = np.simple_new(dimensions.len, &dimensions, Np.Types.FLOAT) orelse {
+            py.PyErr_SetString(generator_error, "Failed while creating `encoded` result array");
+            return null;
+        };
+        var arr: *Np.Array_Obj = @ptrCast(obj);
+        encoded_data = @ptrCast(@alignCast(arr.data));
+        break :blk obj;
+    };
+
+    var labels_data: [*]u8 = undefined;
+    const labels_array = blk: {
+        var dimensions = [_]isize{ @intCast(dataset.len), @intCast(max_id) };
+        var obj = np.simple_new(dimensions.len, &dimensions, Np.Types.BOOL) orelse {
+            py.PyErr_SetString(generator_error, "Failed while creating `labels` result array");
+            return null;
+        };
+        var arr: *Np.Array_Obj = @ptrCast(obj);
+        labels_data = @ptrCast(@alignCast(arr.data));
+        break :blk obj;
+    };
+
+    ids_to_encoded(dataset, encoded_data, labels_data, @intCast(max_id), 0.5);
+
+    const ret = blk: {
+        var tuple = py.PyTuple_New(2);
+        if (tuple == null) {
+            py.PyErr_SetString(generator_error, "Failed while creating result tuple");
+            return null;
+        }
+        py.PyTuple_SET_ITEM(tuple, 0, encoded_array);
+        py.PyTuple_SET_ITEM(tuple, 1, labels_array);
+        break :blk tuple;
+    };
+
+    return ret;
 }
 
 const Ontology = struct {
@@ -188,9 +215,7 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
     ontology = std.mem.zeroes(Ontology);
     ontology.table = global_arena.alloc(f32, max_leaf_index * max_leaf_index) catch @panic("Alloc error");
     ontology.w = max_leaf_index;
-    for (ontology.table) |*it| {
-        it.* = std.math.nan(f32);
-    }
+    @memset(ontology.table, std.math.nan(f32));
 
     if (comptime num_jobs == 1) {
         for (leaf_indices, 0..) |it, it_index| {
@@ -258,6 +283,42 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
 
     py.Py_INCREF(py.Py_None);
     return py.Py_None;
+}
+
+fn parse_list_of_patients(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem.Allocator) ?[][][]u32 {
+    if (py.PyList_Check(codes) == 0) {
+        py.PyErr_SetString(generator_error, "Argument `codes` should be a list");
+        return null;
+    }
+    if (py.PyList_Check(counts) == 0) {
+        py.PyErr_SetString(generator_error, "Argument `counts` should be a list");
+        return null;
+    }
+
+    const list_len = blk: {
+        const _list_len = py.PyList_GET_SIZE(codes);
+        if (_list_len != py.PyList_GET_SIZE(counts)) {
+            py.PyErr_SetString(generator_error, "Argument `codes` and `counts` should have the same size");
+            return null;
+        }
+        break :blk @as(usize, @intCast(_list_len));
+    };
+
+    const dataset = blk: {
+        var dataset = allocator.alloc([][]u32, list_len) catch return null;
+        for (0..list_len) |it| {
+            const codes_obj = py.PyList_GetItem(codes, @intCast(it));
+            const count_obj = py.PyList_GetItem(counts, @intCast(it));
+            dataset[it] = parse_patient(codes_obj, count_obj, allocator) orelse {
+                const msg = std.fmt.allocPrintZ(global_arena, "Error while parsing dataset patient {}", .{it}) catch return null;
+                py.PyErr_SetString(generator_error, msg);
+                return null;
+            };
+        }
+        break :blk dataset;
+    };
+
+    return dataset;
 }
 
 fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem.Allocator) ?[][]u32 {
@@ -485,7 +546,7 @@ fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, labels: [*]u8, max_label:
     @memset(labels[0..index.size], 0);
 
     for (dataset, 0..) |patient, it| {
-        var factor = 1;
+        var factor: f32 = 1;
         for (1..patient.len) |jt| {
             defer factor *= lambda;
 
@@ -495,7 +556,7 @@ fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, labels: [*]u8, max_label:
             }
         }
 
-        for (patient[parse_patient.len - 1]) |c| {
+        for (patient[patient.len - 1]) |c| {
             labels[index.ix(.{ it, c })] = 1;
         }
     }
