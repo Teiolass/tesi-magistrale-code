@@ -23,6 +23,12 @@ const module_methods = [_]py.PyMethodDef{
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "inputs a patient (ids + count), a list of patients (list of ids + list of counts) and a neighborhood size",
     },
+    .{
+        .ml_name = "ids_to_encoded",
+        .ml_meth = _ids_to_encoded,
+        .ml_flags = py.METH_VARARGS,
+        .ml_doc = "",
+    },
     .{ // this one is just a sentinel
         .ml_name = null,
         .ml_meth = null,
@@ -89,11 +95,13 @@ export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyO
     _ = self_obj;
     var arg1: ?*py.PyObject = undefined;
     var arg2: ?*py.PyObject = undefined;
-    var _max_id: i64 = undefined;
+    var arg3: i64 = undefined;
+    var arg4: f32 = undefined;
 
-    if (py.PyArg_ParseTuple(args, "OOl", &arg1, &arg2, &_max_id) == 0) return null;
+    if (py.PyArg_ParseTuple(args, "OOlf", &arg1, &arg2, &arg3, &arg4) == 0) return null;
 
-    const max_id: usize = @intCast(_max_id);
+    const max_id: usize = @intCast(arg3);
+    const lambda: f32 = arg4;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -125,7 +133,7 @@ export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyO
         break :blk obj;
     };
 
-    ids_to_encoded(dataset, encoded_data, labels_data, @intCast(max_id), 0.5);
+    ids_to_encoded(dataset, encoded_data, labels_data, @intCast(max_id), lambda);
 
     const ret = blk: {
         var tuple = py.PyTuple_New(2);
@@ -133,8 +141,8 @@ export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyO
             py.PyErr_SetString(generator_error, "Failed while creating result tuple");
             return null;
         }
-        py.PyTuple_SET_ITEM(tuple, 0, encoded_array);
-        py.PyTuple_SET_ITEM(tuple, 1, labels_array);
+        _ = py.PyTuple_SetItem(tuple, 0, encoded_array);
+        _ = py.PyTuple_SetItem(tuple, 1, labels_array);
         break :blk tuple;
     };
 
@@ -546,11 +554,11 @@ fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, labels: [*]u8, max_label:
     @memset(labels[0..index.size], 0);
 
     for (dataset, 0..) |patient, it| {
-        var factor: f32 = 1;
+        var factor: f32 = 1.0;
         for (1..patient.len) |jt| {
             defer factor *= lambda;
 
-            const visit_it = patient.len - jt;
+            const visit_it = patient.len - jt - 1;
             for (patient[visit_it]) |c| {
                 encoded[index.ix(.{ it, c })] += factor;
             }
