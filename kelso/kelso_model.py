@@ -8,6 +8,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from dataclasses import dataclass
+from typing import Self
 
 
 @dataclass(kw_only=True)
@@ -40,7 +41,13 @@ class Kelso_Model(nn.Module):
             ) 
             self.head = nn.Linear(config.hidden_size, config.output_size, bias=True)
 
-    def forward(
+    def load(path: str, config: Kelso_Config) -> Self:
+        model = Kelso_Model(config) 
+        state_dict = torch.load(path)
+        model.load_state_dict(state_dict)
+        return model
+
+    def forward (
         self,
         batch:     torch.Tensor,
         positions: torch.LongTensor,
@@ -251,4 +258,41 @@ def compute_loss(predictions, outputs) -> torch.Tensor:
         losses.append(loss)
     total_loss = sum(losses)
     return total_loss
+
+@dataclass
+class Inference_Batch:
+    codes:     torch.Tensor
+    positions: torch.Tensor
+    lenghts:   torch.Tensor
+
+    def unpack(self) -> dict:
+        return {
+            'batch':     self.codes,
+            'positions': self.positions,
+            'lengths':   self.lenghts,
+        }
+
+def prepare_batch_for_inference (
+    codes:     list[np.ndarray],
+    counts:    list[np.ndarray],
+    positions: list[np.ndarray],
+    device:    torch.Device,
+) -> Inference_Batch:
+    lengths = [len(x) for x in codes]
+    b_n = max(lengths)
+
+    b_codes     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in codes])
+    b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in positions])
+    with torch.device(device):
+        b_codes     = torch.from_numpy(b_codes)
+        b_positions = torch.from_numpy(b_positions)
+        b_lengths = torch.LongTensor(lengths)
+
+    return Inference_Batch (
+        codes     = b_codes,
+        positions = b_positions,
+        lenghts   = b_lengths,
+    )
+
+
 

@@ -29,12 +29,8 @@ const module_methods = [_]py.PyMethodDef{
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "",
     },
-    .{ // this one is just a sentinel
-        .ml_name = null,
-        .ml_meth = null,
-        .ml_flags = 0,
-        .ml_doc = null,
-    },
+    // this one is just a sentinel
+    std.mem.zeroes(py.PyMethodDef),
 };
 
 // useful link for c apis: https://stackoverflow.com/questions/50668981/how-to-return-a-list-of-ints-in-python-c-api-extension-with-pylist
@@ -578,7 +574,7 @@ var generator_module = py.PyModuleDef{
         .m_copy = null,
     },
     .m_name = "generator",
-    .m_doc = "",
+    .m_doc = "generator module",
     .m_size = -1,
     .m_methods = @constCast(&module_methods),
     .m_slots = null,
