@@ -14,14 +14,12 @@ from tqdm import tqdm
 import tomlkit
 from datetime import datetime
 
-from kelso_model import Kelso_Config, Kelso_Model, compute_loss
+from kelso_model import Kelso_Config, Kelso_Model, compute_loss, CFG_FILE_NAME, MODEL_FILE_NAME
 
 CONFIG_FILE_PATH = 'rem/kelso-ii/config.toml'
 
 LOG_FILE_NAME = 'log.txt'
 CSV_FILE_NAME = 'log.csv'
-CFG_FILE_NAME = 'config.toml' # this is the one that is reported in the save dir
-MODEL_FILE_NAME = 'model.torch'
 
 def nice_print(txt: str):
     tqdm.write(txt)

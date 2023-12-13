@@ -53,7 +53,7 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
     const dataset_codes = arg3;
     const dataset_count = arg4;
     const num_neigh: usize = @intCast(_num_neigh);
-    _ = num_neigh;
+    _ = num_neigh; // @todo this is unused
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();

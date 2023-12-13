@@ -1,15 +1,21 @@
 import polars as pl
 import numpy as np
 
-import math
+import tomlkit
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
+import math
 from dataclasses import dataclass
 from typing import Self
+import os
 
+CFG_FILE_NAME = 'config.toml' # this is the one that is reported in the save dir
+MODEL_FILE_NAME = 'model.torch'
+
+__all__ = ['Kelso_Model', 'load_kelso_for_inference', 'prepare_batch_for_inference', 'Kelso_Config']
 
 @dataclass(kw_only=True)
 class Kelso_Config:
@@ -40,12 +46,6 @@ class Kelso_Model(nn.Module):
                 [Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]
             ) 
             self.head = nn.Linear(config.hidden_size, config.output_size, bias=True)
-
-    def load(path: str, config: Kelso_Config) -> Self:
-        model = Kelso_Model(config) 
-        state_dict = torch.load(path)
-        model.load_state_dict(state_dict)
-        return model
 
     def forward (
         self,
@@ -276,17 +276,22 @@ def prepare_batch_for_inference (
     codes:     list[np.ndarray],
     counts:    list[np.ndarray],
     positions: list[np.ndarray],
-    device:    torch.Device,
+    device:    torch.device,
 ) -> Inference_Batch:
+    codes     = [x.astype(np.int64) for x in codes]
+    counts    = [x.astype(np.int64) for x in counts]
+    positions = [x.astype(np.int64) for x in positions]
+
     lengths = [len(x) for x in codes]
     b_n = max(lengths)
 
     b_codes     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in codes])
     b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in positions])
+
     with torch.device(device):
-        b_codes     = torch.from_numpy(b_codes)
-        b_positions = torch.from_numpy(b_positions)
-        b_lengths = torch.LongTensor(lengths)
+        b_codes     = torch.from_numpy(b_codes)    .to(device)
+        b_positions = torch.from_numpy(b_positions).to(device)
+        b_lengths   = torch.LongTensor(lengths)    .to(device)
 
     return Inference_Batch (
         codes     = b_codes,
@@ -295,4 +300,18 @@ def prepare_batch_for_inference (
     )
 
 
+
+def load_kelso_for_inference(path: str) -> Kelso_Model:
+    config_path = os.path.join(path, CFG_FILE_NAME)
+    model_path  = os.path.join(path, MODEL_FILE_NAME)
+
+    with open(config_path, 'r') as f:
+        txt = f.read()
+    config = tomlkit.parse(txt)['model']
+    config = Kelso_Config(**config)
+
+    model = Kelso_Model(config) 
+    state_dict = torch.load(model_path)
+    model.load_state_dict(state_dict)
+    return model
 

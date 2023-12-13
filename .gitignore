@@ -4,3 +4,4 @@
 python.zig
 test.*
 out.zig
+__pycache__/
