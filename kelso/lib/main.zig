@@ -117,32 +117,9 @@ export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyO
         break :blk obj;
     };
 
-    var labels_data: [*]u8 = undefined;
-    const labels_array = blk: {
-        var dimensions = [_]isize{ @intCast(dataset.len), @intCast(max_id) };
-        var obj = np.simple_new(dimensions.len, &dimensions, Np.Types.BOOL) orelse {
-            py.PyErr_SetString(generator_error, "Failed while creating `labels` result array");
-            return null;
-        };
-        var arr: *Np.Array_Obj = @ptrCast(obj);
-        labels_data = @ptrCast(@alignCast(arr.data));
-        break :blk obj;
-    };
+    ids_to_encoded(dataset, encoded_data, @intCast(max_id), lambda);
 
-    ids_to_encoded(dataset, encoded_data, labels_data, @intCast(max_id), lambda);
-
-    const ret = blk: {
-        var tuple = py.PyTuple_New(2);
-        if (tuple == null) {
-            py.PyErr_SetString(generator_error, "Failed while creating result tuple");
-            return null;
-        }
-        _ = py.PyTuple_SetItem(tuple, 0, encoded_array);
-        _ = py.PyTuple_SetItem(tuple, 1, labels_array);
-        break :blk tuple;
-    };
-
-    return ret;
+    return encoded_array;
 }
 
 const Ontology = struct {
@@ -542,26 +519,21 @@ fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: Ontology, re
     }
 }
 
-fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, labels: [*]u8, max_label: u32, lambda: f32) void {
+fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, max_label: u32, lambda: f32) void {
     const data_size = dataset.len;
     const index = Indexer(2).init(.{ data_size, max_label });
 
     @memset(encoded[0..index.size], 0);
-    @memset(labels[0..index.size], 0);
 
     for (dataset, 0..) |patient, it| {
         var factor: f32 = 1.0;
-        for (1..patient.len) |jt| {
+        for (0..patient.len) |jt| {
             defer factor *= lambda;
 
             const visit_it = patient.len - jt - 1;
             for (patient[visit_it]) |c| {
                 encoded[index.ix(.{ it, c })] += factor;
             }
-        }
-
-        for (patient[patient.len - 1]) |c| {
-            labels[index.ix(.{ it, c })] = 1;
         }
     }
 }
