@@ -15,8 +15,9 @@ model_path     = 'results/kelso2-bpjok-2023-11-17_16:05:31'
 
 dataset_split = 100
 reference     = 2
-k_reals       = 50
-topk_predictions = 30
+k_reals       = 500
+batch_size    = 64
+topk_predictions           = 30
 num_top_important_features = 10
 
 def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
@@ -42,7 +43,7 @@ ontology  = pl.read_parquet(ontology_path)
 diagnoses = pl.read_parquet(diagnoses_path)
 ccs_data  = pl.read_parquet(ccs_path)
 
-diagnoses = diagnoses.head(100_000)
+# diagnoses = diagnoses.head(100_000)
 
 unique_codes = diagnoses['icd9_id'].explode().unique().to_numpy()
 max_ccs_id = ccs_data['ccs_id'].max() + 1
@@ -68,15 +69,15 @@ distance_list = gen.find_neighbours (
 )
 topk = np.argpartition(distance_list, k_reals-1)[:k_reals]
 
-batch_icd       = []
+neigh_icd       = []
 batch_ccs       = []
-batch_counts    = []
-batch_positions = []
+neigh_counts    = []
+neigh_positions = []
 for it in range(k_reals):
-    batch_icd      .append(icd_codes[topk[it]])
+    neigh_icd      .append(icd_codes[topk[it]])
     batch_ccs      .append(ccs_codes[topk[it]])
-    batch_counts   .append(counts   [topk[it]])
-    batch_positions.append(positions[topk[it]])
+    neigh_counts   .append(counts   [topk[it]])
+    neigh_positions.append(positions[topk[it]])
 
 # Present result to explain
 
@@ -100,26 +101,41 @@ ccs_to_explain = labels[index_to_explain]
 
 # Black Box Predictions
 
-batch   = prepare_batch_for_inference(batch_icd, batch_counts, batch_positions, torch.device('cuda'))
-outputs = model(**batch.unpack())
-outputs = [x[-1] for x in outputs]
-# @todo I should pack these lists
-labels  = [x.topk(topk_predictions).indices.cpu().numpy() for x in outputs]
-labels  = [np.any(x == ccs_to_explain) for x in labels]
+labels = []
+cursor = 0
+while cursor < len(neigh_icd):
+    new_cursor = min(cursor+batch_size, len(neigh_icd))
+    batch   = prepare_batch_for_inference(
+        neigh_icd      [cursor:new_cursor],
+        neigh_counts   [cursor:new_cursor],
+        neigh_positions[cursor:new_cursor],
+        torch.device('cuda')
+    )
+    outputs = model(**batch.unpack())
+    outputs = [x[-1] for x in outputs]
+    # @todo I should pack these lists
+    batch_labels = [x.topk(topk_predictions).indices.cpu().numpy() for x in outputs]
+    batch_labels = [np.any(x == ccs_to_explain) for x in batch_labels]
+
+    labels += batch_labels
+    cursor = new_cursor
 
 # Tree fitting
 
-tree_inputs = gen.ids_to_encoded(batch_ccs, batch_counts, max_ccs_id, 0.5)
+tree_inputs = gen.ids_to_encoded(batch_ccs, neigh_counts, max_ccs_id, 0.5)
 
 # @todo add appropriate args
 tree_classifier = DecisionTreeClassifier()
 tree_classifier.fit(tree_inputs, labels)
 
 # Extract explanation
+
 feature_importances = tree_classifier.feature_importances_
 top_important_features = np.argpartition(- np.abs(feature_importances), range(num_top_important_features))
 top_important_features = top_important_features[:num_top_important_features]
 importances = feature_importances[top_important_features]
+
+# present the result to the user
 
 df = pl.DataFrame({'ccs_id':top_important_features.astype(np.uint32), 'importance':importances})
 df = df.join(ccs_data, how='left', on='ccs_id')
