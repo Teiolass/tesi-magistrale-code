@@ -71,7 +71,7 @@ counts_eval    = list(diagnoses_eval['count'   ].to_numpy())
 # Find closest neighbours
 
 print(f'generating neighbours from a dataset of {len(icd_codes_train)} items')
-distance_list = gen.find_neighbours (
+distance_list = gen.compute_patients_distances (
     icd_codes_eval[reference],
     counts_eval[reference],
     icd_codes_train,

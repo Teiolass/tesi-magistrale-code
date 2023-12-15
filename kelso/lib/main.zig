@@ -18,8 +18,8 @@ const module_methods = [_]py.PyMethodDef{
         .ml_doc = "",
     },
     .{
-        .ml_name = "find_neighbours",
-        .ml_meth = _find_neighbours,
+        .ml_name = "compute_patients_distances",
+        .ml_meth = _compute_patients_distances,
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "inputs a patient (ids + count), a list of patients (list of ids + list of counts) and a neighborhood size",
     },
@@ -29,16 +29,21 @@ const module_methods = [_]py.PyMethodDef{
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "",
     },
+    .{
+        .ml_name = "independent_perturbation",
+        .ml_meth = _independent_perturbation,
+        .ml_flags = py.METH_VARARGS,
+        .ml_doc = "",
+    },
     // this one is just a sentinel
     std.mem.zeroes(py.PyMethodDef),
 };
 
-// useful link for c apis: https://stackoverflow.com/questions/50668981/how-to-return-a-list-of-ints-in-python-c-api-extension-with-pylist
-
 var table_c2c: Table_c2c = undefined;
+var ontology: []u32 = undefined;
 
 /// inputs a patient (ids + count), a list of patients (list of ids + list of counts) and a neighborhood size
-export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
+export fn _compute_patients_distances(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
     _ = self_obj;
     var arg1: ?*py.PyObject = undefined;
     var arg2: ?*py.PyObject = undefined;
@@ -78,7 +83,7 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         break :blk obj;
     };
 
-    find_neighbours(patient, dataset, table_c2c, result_data);
+    compute_patients_distances(patient, dataset, table_c2c, result_data);
 
     // @debug
     // py.Py_INCREF(py.Py_None);
@@ -120,6 +125,28 @@ export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyO
     ids_to_encoded(dataset, encoded_data, @intCast(max_id), lambda);
 
     return encoded_array;
+}
+
+export fn _independent_perturbation(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
+    _ = self_obj;
+    var arg1: ?*py.PyObject = undefined;
+    var arg2: ?*py.PyObject = undefined;
+    var arg3: c_int = undefined;
+    var arg4: f32 = undefined;
+
+    if (py.PyArg_ParseTuple(args, "OOlf", &arg1, &arg2, &arg3, &arg4) == 0) return null;
+
+    const keep_prob: f32 = arg4;
+    const multiply_factor: usize = @intCast(arg3);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const dataset = parse_list_of_patients(arg1, arg2, allocator) orelse return null;
+    const result = independent_perturbation(dataset, multiply_factor, keep_prob);
+
+    return result;
 }
 
 const Table_c2c = struct {
@@ -185,8 +212,7 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         break :blk max;
     };
 
-    var _ontology_tree = std.heap.page_allocator.alloc(u32, max_id + 1) catch return null;
-    defer std.heap.page_allocator.free(_ontology_tree);
+    var _ontology_tree = global_arena.alloc(u32, max_id + 1) catch return null;
     for (0..size) |it| {
         const child = tree[2 * it];
         const parent = tree[2 * it + 1];
@@ -261,6 +287,8 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
             thread.join();
         }
     }
+
+    ontology = _ontology_tree;
 
     py.Py_INCREF(py.Py_None);
     return py.Py_None;
@@ -358,14 +386,6 @@ fn compute_c2c(id_1: u32, id_2: u32, _ontology_tree: []u32) f32 {
     const d_lr_doubled: f32 = @floatFromInt(2 * (root_1 - cursor_1));
     const dist = 1.0 - d_lr_doubled / (@as(f32, @floatFromInt(cursor_1 + cursor_2)) + d_lr_doubled);
 
-    // @debug
-    // if (dist < 1e-4) {
-    //     std.debug.print("\n", .{});
-    //     std.debug.print("id_1:{d: <8}id_2:{d: <8}\n", .{ id_1, id_2 });
-    //     std.debug.print("genealogy_1 (root {d: <2} cursor {d: <2}): {any}\n", .{ root_1, cursor_1, genealogy_1 });
-    //     std.debug.print("genealogy_1 (root {d: <2} cursor {d: <2}): {any}\n", .{ root_2, cursor_2, genealogy_2 });
-    // }
-
     return dist;
 }
 
@@ -452,7 +472,7 @@ fn compute_p2p(p1: [][]u32, p2: [][]u32, _table_c2c: Table_c2c, allocator: std.m
 }
 
 /// result is a preallocated array for the result of the same size of dataset
-fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _table_c2c: Table_c2c, result: []f32) void {
+fn compute_patients_distances(patient: [][]u32, dataset: [][][]u32, _table_c2c: Table_c2c, result: []f32) void {
     if (comptime num_jobs == 1) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
@@ -536,6 +556,77 @@ fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, max_label: u32, lambda: f
             }
         }
     }
+}
+
+fn independent_perturbation(dataset: [][][]u32, multiply_factor: usize, keep_prob: f32) *py.PyObject {
+    var ids_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
+    var counts_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var _rng = std.rand.DefaultPrng.init(42);
+    var rng = _rng.random();
+
+    for (dataset, 0..) |patient, it| {
+        for (0..multiply_factor) |jt| {
+            const new_patient = independent_perturb_patient(patient, keep_prob, allocator, rng);
+            const list_id: isize = @intCast(multiply_factor * it + jt);
+            py.PyList_SET_ITEM(ids_list, list_id, new_patient.ids);
+            py.PyList_SET_ITEM(counts_list, list_id, new_patient.counts);
+            _ = arena.reset(.retain_capacity);
+        }
+    }
+
+    const return_tuple = blk: {
+        var tuple = py.PyTuple_New(2);
+        _ = py.PyTuple_SetItem(tuple, 0, ids_list);
+        _ = py.PyTuple_SetItem(tuple, 1, counts_list);
+        break :blk tuple;
+    };
+    return return_tuple;
+}
+
+const Numpy_Patient = struct {
+    ids: *py.PyObject,
+    counts: *py.PyObject,
+};
+
+fn independent_perturb_patient(patient: [][]u32, keep_prob: f32, allocator: std.mem.Allocator, rng: std.rand.Random) Numpy_Patient {
+    const new_visits = allocator.alloc([]bool, patient.len) catch unreachable;
+    var num_taken: usize = 0;
+    for (patient, new_visits) |visit, *new_visit| {
+        new_visit.* = allocator.alloc(bool, visit.len) catch unreachable;
+        for (new_visit.*) |*it| {
+            const r = rng.float(f32);
+            it.* = r < keep_prob;
+            if (it.*) num_taken += 1;
+        }
+    }
+
+    const ids = np.simple_new(1, @ptrCast(&num_taken), Np.Types.UINT) orelse unreachable;
+    const counts = np.simple_new(1, @constCast(@ptrCast(&patient.len)), Np.Types.UINT) orelse unreachable;
+    const ids_data: [*]u32 = @ptrCast(@alignCast(@as(*Np.Array_Obj, @ptrCast(ids)).data));
+    const counts_data: [*]u32 = @ptrCast(@alignCast(@as(*Np.Array_Obj, @ptrCast(counts)).data));
+
+    var cursor: usize = 0;
+    for (patient, new_visits, counts_data) |visit, new_visit, *count| {
+        var counter: u32 = 0;
+        for (visit, new_visit) |code, taken| {
+            if (taken) {
+                ids_data[cursor] = code;
+                cursor += 1;
+                counter += 1;
+            }
+        }
+        count.* = counter;
+    }
+
+    return Numpy_Patient{
+        .ids = ids,
+        .counts = counts,
+    };
 }
 
 var generator_module = py.PyModuleDef{
