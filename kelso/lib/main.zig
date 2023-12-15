@@ -611,14 +611,16 @@ fn independent_perturb_patient(patient: [][]u32, keep_prob: f32, allocator: std.
     const counts_data: [*]u32 = @ptrCast(@alignCast(@as(*Np.Array_Obj, @ptrCast(counts)).data));
 
     var cursor: usize = 0;
-    for (patient, new_visits, counts_data) |visit, new_visit, *count| {
+    var source_cursor: u32 = 0;
+    for (new_visits, counts_data) |new_visit, *count| {
         var counter: u32 = 0;
-        for (visit, new_visit) |code, taken| {
+        for (new_visit) |taken| {
             if (taken) {
-                ids_data[cursor] = code;
+                ids_data[cursor] = source_cursor;
                 cursor += 1;
                 counter += 1;
             }
+            source_cursor += 1;
         }
         count.* = counter;
     }

@@ -13,12 +13,14 @@ diagnoses_path = 'data/processed/diagnoses.parquet'
 ccs_path       = 'data/processed/ccs.parquet'
 model_path     = 'results/kelso2-bpjok-2023-11-17_16:05:31'
 
-reference     = 2
-k_reals       = 500
-batch_size    = 64
+reference  = 2
+k_reals    = 100
+batch_size = 64
+keep_prob  = 0.8
 topk_predictions           = 30
 tree_train_fraction        = 0.8
 num_top_important_features = 10
+synthetic_multiply_factor  = 10
 
 def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
     codes = pl.DataFrame({'icd9_id':ids})
@@ -68,7 +70,7 @@ icd_codes_eval = list(diagnoses_eval['icd9_id' ].to_numpy())
 positions_eval = list(diagnoses_eval['position'].to_numpy())
 counts_eval    = list(diagnoses_eval['count'   ].to_numpy())
 
-# Find closest neighbours
+# Find closest neighbours in the real data
 
 print(f'generating neighbours from a dataset of {len(icd_codes_train)} items')
 distance_list = gen.compute_patients_distances (
@@ -81,14 +83,33 @@ distance_list = gen.compute_patients_distances (
 topk = np.argpartition(distance_list, k_reals-1)[:k_reals]
 
 neigh_icd       = []
-batch_ccs       = []
+neigh_ccs       = []
 neigh_counts    = []
 neigh_positions = []
 for it in range(k_reals):
     neigh_icd      .append(icd_codes_train[topk[it]])
-    batch_ccs      .append(ccs_codes_train[topk[it]])
+    neigh_ccs      .append(ccs_codes_train[topk[it]])
     neigh_counts   .append(counts_train   [topk[it]])
     neigh_positions.append(positions_train[topk[it]])
+
+# augment the neighbours with some synthetic points
+
+displacements, new_counts = gen.independent_perturbation(neigh_icd, neigh_counts, synthetic_multiply_factor, keep_prob)
+
+neigh_counts = new_counts
+new_neigh_icd       = []
+new_neigh_ccs       = []
+new_neigh_counts    = []
+new_neigh_positions = []
+for it, (icd, ccs, pos) in enumerate(zip(neigh_icd, neigh_ccs, neigh_positions)):
+    for jt in range(synthetic_multiply_factor):
+        displ = displacements[synthetic_multiply_factor * it + jt]
+        new_neigh_icd      .append(icd[displ])
+        new_neigh_ccs      .append(ccs[displ])
+        new_neigh_positions.append(pos[displ])
+neigh_icd       = new_neigh_icd
+neigh_ccs       = new_neigh_ccs
+neigh_positions = new_neigh_positions
 
 # Choose result to explain
 
@@ -139,7 +160,7 @@ while cursor < len(neigh_icd):
 
 # Tree fitting
 
-tree_inputs = gen.ids_to_encoded(batch_ccs, neigh_counts, max_ccs_id, 0.5)
+tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
 
 # @todo add appropriate args
 tree_classifier = DecisionTreeClassifier()
