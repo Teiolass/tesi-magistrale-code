@@ -17,6 +17,7 @@ reference     = 2
 k_reals       = 500
 batch_size    = 64
 topk_predictions           = 30
+tree_train_fraction        = 0.8
 num_top_important_features = 10
 
 def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
@@ -37,6 +38,8 @@ def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
         print(txt)
         cursor += length
             
+
+# Load base data and model
 
 ontology  = pl.read_parquet(ontology_path)
 diagnoses = pl.read_parquet(diagnoses_path)
@@ -87,7 +90,7 @@ for it in range(k_reals):
     neigh_counts   .append(counts_train   [topk[it]])
     neigh_positions.append(positions_train[topk[it]])
 
-# Present result to explain
+# Choose result to explain
 
 batch = prepare_batch_for_inference(
     [icd_codes_eval[reference]],
@@ -114,7 +117,7 @@ ccs_to_explain = labels[index_to_explain]
 
 # Black Box Predictions
 
-labels = []
+labels = np.empty((len(neigh_icd), ), dtype=np.bool_)
 cursor = 0
 while cursor < len(neigh_icd):
     new_cursor = min(cursor+batch_size, len(neigh_icd))
@@ -126,11 +129,12 @@ while cursor < len(neigh_icd):
     )
     outputs = model(**batch.unpack())
     outputs = [x[-1] for x in outputs]
-    # @todo I should pack these lists
-    batch_labels = [x.topk(topk_predictions).indices.cpu().numpy() for x in outputs]
-    batch_labels = [np.any(x == ccs_to_explain) for x in batch_labels]
+    outputs = torch.stack(outputs)
+    batch_labels = outputs.topk(topk_predictions, dim=-1).indices
+    batch_labels = torch.any(batch_labels == ccs_to_explain, dim=-1)
+    batch_labels = batch_labels.cpu().numpy()
 
-    labels += batch_labels
+    labels[cursor:new_cursor] = batch_labels
     cursor = new_cursor
 
 # Tree fitting
@@ -139,7 +143,18 @@ tree_inputs = gen.ids_to_encoded(batch_ccs, neigh_counts, max_ccs_id, 0.5)
 
 # @todo add appropriate args
 tree_classifier = DecisionTreeClassifier()
-tree_classifier.fit(tree_inputs, labels)
+
+train_split = int(tree_train_fraction * len(labels))
+
+tree_inputs_train = tree_inputs[:train_split]
+tree_inputs_eval  = tree_inputs[train_split:]
+labels_train      = labels[:train_split]
+labels_eval       = labels[train_split:]
+
+tree_classifier.fit(tree_inputs_train, labels_train)
+outputs = tree_classifier.predict(tree_inputs_eval)
+accuracy = (outputs == labels_eval).sum() / len(outputs)
+print(f'accuracy is {accuracy*100:.2f}%')
 
 # Extract explanation
 
