@@ -140,12 +140,14 @@ diagnoses = diagnoses_a.join(diagnoses_b, on='subject_id', how='inner')
 
 # Split in train/eval/test
 
-split_train = len(diagnoses) // train_fraction
-split_eval  = split_train + len(diagnoses) // eval_fraction
+split_train = int(len(diagnoses) * train_fraction)
+split_eval  = int(split_train + len(diagnoses) * eval_fraction)
 
 diagnoses_cols = diagnoses.columns
 diagnoses = (
-    diagnoses.with_row_count('ix')
+    diagnoses.lazy()
+    .with_row_count('ix')
+    .with_columns(col('ix').shuffle())
     .select (
         diagnoses_cols,
         role = (
@@ -157,6 +159,7 @@ diagnoses = (
             .otherwise(pl.lit('test', dtype=pl.Categorical))
         )
     )
+    .collect()
 )
 
 # Build Ontology
