@@ -43,6 +43,7 @@ ontology  = pl.read_parquet(ontology_path)
 diagnoses = pl.read_parquet(diagnoses_path)
 ccs_data  = pl.read_parquet(ccs_path)
 
+# @debug
 # diagnoses = diagnoses.head(100_000)
 
 unique_codes = diagnoses['icd9_id'].explode().unique().to_numpy()
@@ -60,6 +61,7 @@ model = load_kelso_for_inference(model_path)
 
 # Find closest neighbours
 
+print(f'generating neighbours from a dataset of {len(icd_codes[dataset_split:])} items')
 distance_list = gen.find_neighbours (
     icd_codes[reference],
     counts[reference],
@@ -105,7 +107,7 @@ labels = []
 cursor = 0
 while cursor < len(neigh_icd):
     new_cursor = min(cursor+batch_size, len(neigh_icd))
-    batch   = prepare_batch_for_inference(
+    batch   = prepare_batch_for_inference (
         neigh_icd      [cursor:new_cursor],
         neigh_counts   [cursor:new_cursor],
         neigh_positions[cursor:new_cursor],
@@ -135,7 +137,7 @@ top_important_features = np.argpartition(- np.abs(feature_importances), range(nu
 top_important_features = top_important_features[:num_top_important_features]
 importances = feature_importances[top_important_features]
 
-# present the result to the user
+# Present the result to the user
 
 df = pl.DataFrame({'ccs_id':top_important_features.astype(np.uint32), 'importance':importances})
 df = df.join(ccs_data, how='left', on='ccs_id')
@@ -150,4 +152,3 @@ for it, row in enumerate(df.iter_rows()):
     line = f'{pos: <4}{importance: <7.3f} {code: <8} {description}'
     print(line)
 
-breakpoint()

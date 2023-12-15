@@ -20,6 +20,9 @@ output_ontology  = 'ontology.parquet'
 
 min_icd_occurences = 20
 
+train_fraction = 0.7
+eval_fraction  = 0.15
+
 ontology_prefixes = ['http://purl.bioontology.org/ontology/ICD9CM/', 'http://purl.bioontology.org/ontology/STY/']
 ontology_root_name = 'root'
 
@@ -135,6 +138,27 @@ diagnoses_b = (
 )
 diagnoses = diagnoses_a.join(diagnoses_b, on='subject_id', how='inner')
 
+# Split in train/eval/test
+
+split_train = len(diagnoses) // train_fraction
+split_eval  = split_train + len(diagnoses) // eval_fraction
+
+diagnoses_cols = diagnoses.columns
+diagnoses = (
+    diagnoses.with_row_count('ix')
+    .select (
+        diagnoses_cols,
+        role = (
+            pl
+            .when(col('ix') < split_train)
+            .then(pl.lit('train', dtype=pl.Categorical))
+            .when(col('ix') < split_eval)
+            .then(pl.lit('eval', dtype=pl.Categorical))
+            .otherwise(pl.lit('test', dtype=pl.Categorical))
+        )
+    )
+)
+
 # Build Ontology
 
 ontology   = pl.read_csv(ontology_file)
@@ -195,17 +219,19 @@ ontology = pl.concat([
 dictionary = ontology.select(parent=pl.col('icd_code'), parent_id=pl.col('icd9_id'))
 ontology = ontology.join(dictionary, how='left', on='parent')
 
-# Save
+# @@ Save
 
 diagnoses_path = os.path.join(output_prefix, output_diagnoses)
 ccs_path       = os.path.join(output_prefix, output_ccs)
 icd9_path      = os.path.join(output_prefix, output_icd)
 ontology_path  = os.path.join(output_prefix, output_ontology)
 
+print('')
 print(f'diagnoses path is: {diagnoses_path}')
 print(f'ccs path is:       {ccs_path}')
 print(f'icd9 path is:      {icd9_path}')
 print(f'ontology path is:  {ontology_path}')
+print('')
 
 diagnoses .write_parquet(diagnoses_path)
 ccs_codes .write_parquet(ccs_path)
