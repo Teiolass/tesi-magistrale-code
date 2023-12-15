@@ -1,4 +1,4 @@
-// this is chosen looking at the input ontology
+// this is chosen looking at the input table_c2c
 const genealogy_max_size: usize = 12;
 const num_jobs: usize = 16;
 
@@ -35,7 +35,7 @@ const module_methods = [_]py.PyMethodDef{
 
 // useful link for c apis: https://stackoverflow.com/questions/50668981/how-to-return-a-list-of-ints-in-python-c-api-extension-with-pylist
 
-var ontology: Ontology = undefined;
+var table_c2c: Table_c2c = undefined;
 
 /// inputs a patient (ids + count), a list of patients (list of ids + list of counts) and a neighborhood size
 export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
@@ -78,7 +78,7 @@ export fn _find_neighbours(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         break :blk obj;
     };
 
-    find_neighbours(patient, dataset, ontology, result_data);
+    find_neighbours(patient, dataset, table_c2c, result_data);
 
     // @debug
     // py.Py_INCREF(py.Py_None);
@@ -122,15 +122,15 @@ export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyO
     return encoded_array;
 }
 
-const Ontology = struct {
+const Table_c2c = struct {
     table: []f32,
     w: usize,
 
-    inline fn get(self: Ontology, c1: u32, c2: u32) f32 {
+    inline fn get(self: Table_c2c, c1: u32, c2: u32) f32 {
         return self.table[c1 * self.w + c2];
     }
 
-    inline fn get_mut(self: Ontology, c1: u32, c2: u32) *f32 {
+    inline fn get_mut(self: Table_c2c, c1: u32, c2: u32) *f32 {
         return &self.table[c1 * self.w + c2];
     }
 };
@@ -193,24 +193,24 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         _ontology_tree[child] = parent;
     }
 
-    ontology = std.mem.zeroes(Ontology);
-    ontology.table = global_arena.alloc(f32, max_leaf_index * max_leaf_index) catch @panic("Alloc error");
-    ontology.w = max_leaf_index;
-    @memset(ontology.table, std.math.nan(f32));
+    table_c2c = std.mem.zeroes(Table_c2c);
+    table_c2c.table = global_arena.alloc(f32, max_leaf_index * max_leaf_index) catch @panic("Alloc error");
+    table_c2c.w = max_leaf_index;
+    @memset(table_c2c.table, std.math.nan(f32));
 
     if (comptime num_jobs == 1) {
         for (leaf_indices, 0..) |it, it_index| {
             for (leaf_indices[0 .. it_index + 1]) |jt| {
                 const dist = compute_c2c(it, jt, _ontology_tree);
-                ontology.get_mut(it, jt).* = dist;
-                ontology.get_mut(jt, it).* = dist;
+                table_c2c.get_mut(it, jt).* = dist;
+                table_c2c.get_mut(jt, it).* = dist;
             }
         }
     } else {
         const Thread_Data = struct {
             ontology_tree: []u32,
             leaf_indices: []u32,
-            ontology: Ontology,
+            table_c2c: Table_c2c,
             start: usize,
             len: usize,
 
@@ -220,8 +220,8 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
                 for (self.leaf_indices[self.start .. self.start + self.len], 0..) |it, it_index| {
                     for (self.leaf_indices[0 .. self.start + it_index + 1]) |jt| {
                         const dist = compute_c2c(it, jt, self.ontology_tree);
-                        ontology.get_mut(it, jt).* = dist;
-                        ontology.get_mut(jt, it).* = dist;
+                        table_c2c.get_mut(it, jt).* = dist;
+                        table_c2c.get_mut(jt, it).* = dist;
                     }
                 }
             }
@@ -249,7 +249,7 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
             const thread_data = Thread_Data{
                 .ontology_tree = _ontology_tree,
                 .leaf_indices = leaf_indices,
-                .ontology = ontology,
+                .table_c2c = table_c2c,
                 .start = cursor,
                 .len = true_size,
             };
@@ -383,12 +383,12 @@ fn get_genealogy(id: u32, _ontology_tree: []u32) struct { [genealogy_max_size]u3
     return .{ res, it };
 }
 
-fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: Ontology) f32 {
+fn asymmetrical_v2v(v1: []u32, v2: []u32, _table_c2c: Table_c2c) f32 {
     var sum: f32 = 0;
     for (v1) |c1| {
         var best = std.math.floatMax(f32);
         for (v2) |c2| {
-            const dist = _ontology.get(c1, c2);
+            const dist = _table_c2c.get(c1, c2);
             // const dist = blk: {
             //     var x: f32 = 1.0;
             //     if (c1 == c2) x = 0.0;
@@ -401,21 +401,21 @@ fn asymmetrical_v2v(v1: []u32, v2: []u32, _ontology: Ontology) f32 {
     return sum;
 }
 
-fn compute_v2v(v1: []u32, v2: []u32, _ontology: Ontology) f32 {
-    const x = asymmetrical_v2v(v1, v2, _ontology);
-    const y = asymmetrical_v2v(v2, v1, _ontology);
+fn compute_v2v(v1: []u32, v2: []u32, _table_c2c: Table_c2c) f32 {
+    const x = asymmetrical_v2v(v1, v2, _table_c2c);
+    const y = asymmetrical_v2v(v2, v1, _table_c2c);
     // return x + y;
     return @max(x, y);
 }
 
-fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: Ontology, allocator: std.mem.Allocator) f32 {
+fn compute_p2p(p1: [][]u32, p2: [][]u32, _table_c2c: Table_c2c, allocator: std.mem.Allocator) f32 {
     var table = allocator.alloc(f32, p1.len * p2.len) catch @panic("error with allocation");
 
     const w = p1.len;
 
     for (0..p1.len) |it| {
         for (0..p2.len) |jt| {
-            const cost = compute_v2v(p1[it], p2[jt], _ontology);
+            const cost = compute_v2v(p1[it], p2[jt], _table_c2c);
             var in_cost: f32 = std.math.floatMax(f32);
             var del_cost: f32 = std.math.floatMax(f32);
             var edit_cost: f32 = std.math.floatMax(f32);
@@ -452,20 +452,20 @@ fn compute_p2p(p1: [][]u32, p2: [][]u32, _ontology: Ontology, allocator: std.mem
 }
 
 /// result is a preallocated array for the result of the same size of dataset
-fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: Ontology, result: []f32) void {
+fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _table_c2c: Table_c2c, result: []f32) void {
     if (comptime num_jobs == 1) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
 
         for (dataset, 0..) |d_patient, it| {
-            const dist = compute_p2p(patient, d_patient, _ontology, allocator);
+            const dist = compute_p2p(patient, d_patient, _table_c2c, allocator);
             result[it] = dist;
             _ = arena.reset(.retain_capacity);
         }
     } else {
         const Thread_Data = struct {
-            ontology: Ontology,
+            table_c2c: Table_c2c,
             dataset: [][][]u32,
             patient: [][]u32,
             result: []f32,
@@ -485,7 +485,7 @@ fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: Ontology, re
 
                     const index_limit = @min(self.dataset.len, index + batch_size);
                     for (self.dataset[index..index_limit], index..) |d_patient, it| {
-                        const dist = compute_p2p(self.patient, d_patient, self.ontology, allocator);
+                        const dist = compute_p2p(self.patient, d_patient, self.table_c2c, allocator);
                         self.result[it] = dist;
                         _ = arena.reset(.retain_capacity);
                     }
@@ -504,7 +504,7 @@ fn find_neighbours(patient: [][]u32, dataset: [][][]u32, _ontology: Ontology, re
 
         for (threads) |*thread| {
             const thread_data = Thread_Data{
-                .ontology = _ontology,
+                .table_c2c = _table_c2c,
                 .dataset = dataset,
                 .patient = patient,
                 .result = result,
