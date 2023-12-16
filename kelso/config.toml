@@ -2,25 +2,25 @@ diagnoses_path = 'data/processed/diagnoses.parquet'
 
 [model]
 hidden_size = 128
-num_layers  = 6
-num_heads   = 12
-head_dim    = 16
+num_layers  = 16
+num_heads   = 1
+head_dim    = 256
 pos_base    = 10_000
 dropout     = 0.6
 device      = 'cuda'
-mlp_intermediate_size = 1024
+mlp_intermediate_size = 512
 
 [trainer]
 batch_size      = 32
-num_epochs      = 200
+num_epochs      = 1000
 learning_rate   = 4e-4
 max_patient_len = 150
 eval_split      = 0.15
 test_split      = 0.15
-weight_decay    = 0.02
+weight_decay    = 0.01
 eval_batch_size = 64
 ccs_as_inputs   = false
-patience        = 5
+patience        = 20
 save_directory  = 'results/kelso2-%(id)-%(date)/'
 # limit_num_batches = 3
 

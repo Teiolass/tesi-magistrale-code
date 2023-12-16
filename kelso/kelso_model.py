@@ -45,6 +45,7 @@ class Kelso_Model(nn.Module):
             self.decoder_layers = nn.ModuleList (
                 [Kelso_Decoder_Layer(config, rotary_embedding) for _ in range(config.num_layers)]
             ) 
+            self.pooling = Kelso_Pooling(config)
             self.head = nn.Linear(config.hidden_size, config.output_size, bias=True)
 
     def forward (
@@ -99,22 +100,16 @@ class Kelso_Model(nn.Module):
 
         # PHASE 4: extract output
 
-        batch.masked_fill_(positions.unsqueeze(2) == -1, 0)
-        v_s = positions.max(-1).values + 1
+        # this is of shape (bsz, b_m, hidden)
+        batch_pooled = self.pooling(batch, positions, lengths)
+        output = self.head(batch_pooled)
 
-        predictions = []
+        result = []
         for it in range(bsz):
-            t = torch.zeros((v_s[it], batch.shape[-1]), device=batch.device)
-            v = torch.zeros((v_s[it],), device=batch.device)
-            ids = positions[it].clamp(0)
-            t.index_add_(0, ids, batch[it])
-            filled = torch.ones(batch.shape[1], device=batch.device)
-            filled.masked_fill_(positions[it] == -1, 0)
-            v.index_add_(0, ids, filled)
-            output = self.head(t / v.unsqueeze(1))
-            predictions.append(output)
+            t = output[it][:positions[it].max() + 1]
+            result.append(t)
 
-        return predictions
+        return result
 
 
 
@@ -164,7 +159,7 @@ class Kelso_Decoder_Layer(nn.Module):
     
     def forward(self, batch: torch.Tensor, positions: torch.LongTensor, mask: torch.Tensor):
         residual = batch
-        batch = self.attention(batch, positions, mask)
+        batch = self.attention(batch, mask, positions)
         batch = F.dropout(batch, p=self.dropout, training=self.training)
         batch = batch + residual
         residual = batch
@@ -177,11 +172,11 @@ class Kelso_Decoder_Layer(nn.Module):
 
 
 class Kelso_Attention(nn.Module):
-    def __init__(self, config: Kelso_Config, rotary_embedding: Rotary_Embedding):
+    def __init__(self, config: Kelso_Config, rotary_embedding: Rotary_Embedding|None = None):
         super().__init__()
-        self.head_dim = config.head_dim
-        self.num_heads = config.num_heads
-        self.hidden_size = config.hidden_size 
+        self.head_dim         = config.head_dim
+        self.num_heads        = config.num_heads
+        self.hidden_size      = config.hidden_size
         self.rotary_embedding = rotary_embedding
 
         self.q_proj = nn.Linear(self.hidden_size,               self.num_heads * self.head_dim, bias=False)
@@ -194,8 +189,8 @@ class Kelso_Attention(nn.Module):
     def forward (
         self,
         hidden_states: torch.Tensor,
-        positions:     torch.LongTensor,
         mask:          torch.Tensor,
+        positions:     torch.LongTensor|None = None,
     ):
         bsz, b_n, _ = hidden_states.shape
 
@@ -206,20 +201,14 @@ class Kelso_Attention(nn.Module):
         key_states   = key_states  .view(bsz, b_n, self.num_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, b_n, self.num_heads, self.head_dim).transpose(1, 2)
 
-        query_states = self.rotary_embedding(query_states, positions)
-        key_states   = self.rotary_embedding(key_states,   positions)
+        if self.rotary_embedding is not None:
+            query_states = self.rotary_embedding(query_states, positions)
+            key_states   = self.rotary_embedding(key_states,   positions)
+        else:
+            if positions is not None:
+                raise ValueError('positions provided but no rotary embedding is set')
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if attn_weights.size() != (bsz, self.num_heads, b_n, b_n):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, b_n, b_n)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        if mask.size() != (bsz, 1, b_n, b_n):
-            raise ValueError(
-                f"Attention mask should be of size {(bsz, 1, b_n, b_n)}, but is {mask.size()}"
-            )
         attn_weights = attn_weights + mask
 
         attn_weights = F.softmax(attn_weights, dim=-1)
@@ -258,6 +247,62 @@ def compute_loss(predictions, outputs) -> torch.Tensor:
         losses.append(loss)
     total_loss = sum(losses)
     return total_loss
+
+class Kelso_Pooling(nn.Module):
+    def __init__(self, config: Kelso_Config):
+        super().__init__()
+        self.scorer_attn = Kelso_Attention(config)
+        self.scorer_gmlp = Kelso_MLP(config.hidden_size, config.mlp_intermediate_size)
+
+    def forward(self, batch: torch.Tensor, pos: torch.LongTensor, lengths: torch.LongTensor) -> torch.Tensor:
+        bsz, b_n, h = batch.shape
+        b_m = pos.max() + 1
+        minus_inf = torch.finfo(torch.float).min
+        
+        # compute pooling scores
+        with torch.device(batch.device):
+            decoder_mask = torch.full((bsz, b_n, b_n), 0.0)
+            decoder_mask = decoder_mask.masked_fill_(pos.unsqueeze(2) != pos.unsqueeze(1), minus_inf)
+
+            filter   = torch.arange(b_n).view((1, -1))
+            pad_mask = torch.full((bsz, b_n), minus_inf)
+            pad_mask = pad_mask.masked_fill_(filter < lengths.view((-1, 1)), 0)
+
+        decoder_mask = decoder_mask[:, None, :, :]
+        pad_mask = pad_mask[:, None, None, :]
+        mask = pad_mask + decoder_mask
+
+        pooling_score = self.scorer_attn(batch, mask)
+        pooling_score = self.scorer_gmlp(batch)
+
+        # visit-wise sums helpers
+        ids = pos.clamp(0, None) + torch.arange(bsz, device=pos.device).unsqueeze(1) * b_m
+        ids = ids.flatten()
+
+        # Compute visit-wise softmax
+        pooling_mask = torch.zeros((bsz, b_n, 1), device=batch.device)
+        pooling_mask.masked_fill_((pos == -1).unsqueeze(2), minus_inf)
+
+        pooling_score += pooling_mask
+        pooling_score = torch.exp(pooling_score)
+        pooling_score = pooling_score.reshape(-1, h)
+
+        sums = torch.zeros((bsz * b_m, h), device=batch.device)
+        # @debug
+        # sums = torch.index_add(sums, 0, ids, pooling_score)
+        sums = sums.index_add_(0, ids, pooling_score)
+        pooling_probs = pooling_score / sums[ids]
+
+        # now pool
+        batch = batch.reshape((-1, h)) * pooling_probs
+        result = torch.zeros((bsz * b_m, h), device=batch.device)
+        # @debug
+        # result = torch.index_add(result, 0, ids, batch)
+        result = result.index_add_(0, ids, batch)
+        result = result.reshape((bsz, b_m, h))
+
+        return result
+
 
 @dataclass
 class Inference_Batch:
