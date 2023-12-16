@@ -1,5 +1,4 @@
 diagnoses_path = 'data/processed/diagnoses.parquet'
-ccs_codes_path = 'data/processed/codes.parquet'
 
 [model]
 hidden_size = 128

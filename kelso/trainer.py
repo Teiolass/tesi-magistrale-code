@@ -16,7 +16,7 @@ from datetime import datetime
 
 from kelso_model import Kelso_Config, Kelso_Model, compute_loss, CFG_FILE_NAME, MODEL_FILE_NAME
 
-CONFIG_FILE_PATH = 'rem/kelso-ii/config.toml'
+CONFIG_FILE_PATH = 'repo/kelso/config.toml'
 
 LOG_FILE_NAME = 'log.txt'
 CSV_FILE_NAME = 'log.csv'
@@ -131,27 +131,19 @@ class Training_Results:
 
 
 def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Config) -> Training_Results:
-    ccs_codes = list(diagnoses['ccs_id']  .to_numpy())
-    if trainer_config.ccs_as_inputs:
-        input_codes = list(diagnoses['ccs_id'] .to_numpy())
-    else:
-        input_codes = list(diagnoses['icd9_id'] .to_numpy())
-    positions = list(diagnoses['position'].to_numpy())
-    counts    = list(diagnoses['count']   .to_numpy())
+    def split(data):
+        ccs_codes = list(data['ccs_id']  .to_numpy())
+        if trainer_config.ccs_as_inputs:
+            input_codes = list(data['ccs_id'] .to_numpy())
+        else:
+            input_codes = list(data['icd9_id'] .to_numpy())
+        positions = list(data['position'].to_numpy())
+        counts    = list(data['count']   .to_numpy())
+        return ccs_codes, input_codes, counts, positions
 
-    num_eval = int(trainer_config.eval_split * len(ccs_codes))
-    num_test = int(trainer_config.test_split * len(ccs_codes))
-    p = num_eval + num_test
-    splits   = ((p, len(ccs_codes)), (0, num_eval), (num_eval, p))
-
-    # the order is train, eval, test. However they are taken from the dataset 
-    # in the eval, test, train order
-    split_fn = lambda x, y: (x[b[0]:b[1]] for b in y)
-
-    ccs_train,       ccs_eval,       ccs_test       = split_fn(ccs_codes,   splits)
-    input_train,     input_eval,     input_test     = split_fn(input_codes, splits)
-    positions_train, positions_eval, positions_test = split_fn(positions,   splits)
-    counts_train,    counts_eval,    counts_test    = split_fn(counts,      splits)
+    ccs_train, input_train, counts_train, positions_train = split(diagnoses.filter(pl.col('role') == 'train'))
+    ccs_eval,  input_eval,  counts_eval,  positions_eval  = split(diagnoses.filter(pl.col('role') == 'eval'))
+    ccs_test,  input_test,  counts_test,  positions_test  = split(diagnoses.filter(pl.col('role') == 'test'))
 
     # find the number of batches
     num_batches = len(ccs_train) // trainer_config.batch_size
@@ -334,7 +326,7 @@ def prepare_data(i_ccs, i_input, i_positions, i_counts):
     b_positions = [x[:-int(c[-1])].astype(np.int_) for x, c in zip(i_positions, i_counts)]
     lengths = [len(x) for x in b_input]
     b_n     = max(lengths)
-    b_input     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in b_input])
+    b_input     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in b_input]).astype(np.int64)
     b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in b_positions])
     b_input     = torch.from_numpy(b_input)    .to(model.config.device)
     b_positions = torch.from_numpy(b_positions).to(model.config.device)
@@ -372,7 +364,6 @@ if __name__ == '__main__':
     config = tomlkit.parse(txt)
 
     diagnoses = pl.read_parquet(config['diagnoses_path'])
-    ccs_codes = pl.read_parquet(config['ccs_codes_path'])
 
     config['model']['vocab_size']  = diagnoses['icd9_id'].list.max().max() + 1
     config['model']['output_size'] = diagnoses['ccs_id'] .list.max().max() + 1
