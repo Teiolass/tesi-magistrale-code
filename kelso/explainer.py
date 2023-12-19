@@ -7,16 +7,21 @@ from kelso_model import *
 
 import torch # @todo necessary?
 from sklearn.tree import DecisionTreeClassifier
+from sklearn import metrics
+
+import random
+
+from tqdm import tqdm
 
 ontology_path  = 'data/processed/ontology.parquet'
 diagnoses_path = 'data/processed/diagnoses.parquet'
 ccs_path       = 'data/processed/ccs.parquet'
-model_path     = 'results/kelso2-bpjok-2023-11-17_16:05:31'
+model_path     = 'results/a-kelso2-xjdmk-2023-12-16_15:37:22'
 
-reference  = 2
-k_reals    = 100
-batch_size = 64
-keep_prob  = 0.8
+k_reals        = 500
+batch_size     = 64
+keep_prob      = 0.8
+num_references = 10
 topk_predictions           = 30
 tree_train_fraction        = 0.8
 num_top_important_features = 10
@@ -40,6 +45,51 @@ def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
         print(txt)
         cursor += length
             
+def choose_ccs_to_explain(labels: np.ndarray, ccs_data: pl.DataFrame) -> int:
+    labels_with_description = pl.DataFrame({'ccs_id':labels}).join(ccs_data, how='left', on='ccs_id')
+    for it, row in enumerate(labels_with_description.iter_rows()):
+        selector = f'{it})'
+        code = row[1]
+        description = row[2]
+        code = f'[{code}]' 
+        line = f'{selector: >3} {code: <7} {description} - {row[0]}'
+        print(line)
+
+    index_to_explain = input('What do you want to explain? ')
+    index_to_explain = int(index_to_explain)
+    ccs_to_explain = labels[index_to_explain]
+    return ccs_to_explain
+
+def explain_label(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction):
+    # Tree fitting
+
+    tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
+
+    # @todo add appropriate args
+    tree_classifier = DecisionTreeClassifier()
+
+    train_split = int(tree_train_fraction * len(labels))
+
+    tree_inputs_train = tree_inputs[:train_split]
+    tree_inputs_eval  = tree_inputs[train_split:]
+    labels_train      = labels[:train_split]
+    labels_eval       = labels[train_split:]
+
+    tree_classifier.fit(tree_inputs_train, labels_train)
+    outputs = tree_classifier.predict(tree_inputs_eval)
+    # @todo
+    accuracy = metrics.accuracy_score(labels_eval, outputs)
+    f1_score = metrics.f1_score(labels_eval, outputs)
+
+    # Extract explanation
+
+    feature_importances = tree_classifier.feature_importances_
+    top_important_features = np.argpartition(- np.abs(feature_importances), range(num_top_important_features))
+    top_important_features = top_important_features[:num_top_important_features]
+    importances = feature_importances[top_important_features]
+
+    return top_important_features, importances, accuracy, f1_score
+
 
 # Load base data and model
 
@@ -70,132 +120,116 @@ icd_codes_eval = list(diagnoses_eval['icd9_id' ].to_numpy())
 positions_eval = list(diagnoses_eval['position'].to_numpy())
 counts_eval    = list(diagnoses_eval['count'   ].to_numpy())
 
-# Find closest neighbours in the real data
+total_accuracy = 0.0
+total_f1_score = 0.0
 
-print(f'generating neighbours from a dataset of {len(icd_codes_train)} items')
-distance_list = gen.compute_patients_distances (
-    icd_codes_eval[reference],
-    counts_eval[reference],
-    icd_codes_train,
-    counts_train,
-    0, # this is unused for now
-)
-topk = np.argpartition(distance_list, k_reals-1)[:k_reals]
-
-neigh_icd       = []
-neigh_ccs       = []
-neigh_counts    = []
-neigh_positions = []
-for it in range(k_reals):
-    neigh_icd      .append(icd_codes_train[topk[it]])
-    neigh_ccs      .append(ccs_codes_train[topk[it]])
-    neigh_counts   .append(counts_train   [topk[it]])
-    neigh_positions.append(positions_train[topk[it]])
-
-# augment the neighbours with some synthetic points
-
-displacements, new_counts = gen.independent_perturbation(neigh_icd, neigh_counts, synthetic_multiply_factor, keep_prob)
-
-neigh_counts = new_counts
-new_neigh_icd       = []
-new_neigh_ccs       = []
-new_neigh_counts    = []
-new_neigh_positions = []
-for it, (icd, ccs, pos) in enumerate(zip(neigh_icd, neigh_ccs, neigh_positions)):
-    for jt in range(synthetic_multiply_factor):
-        displ = displacements[synthetic_multiply_factor * it + jt]
-        new_neigh_icd      .append(icd[displ])
-        new_neigh_ccs      .append(ccs[displ])
-        new_neigh_positions.append(pos[displ])
-neigh_icd       = new_neigh_icd
-neigh_ccs       = new_neigh_ccs
-neigh_positions = new_neigh_positions
-
-# Choose result to explain
-
-batch = prepare_batch_for_inference(
-    [icd_codes_eval[reference]],
-    [counts_eval[reference]],
-    [positions_eval[reference]],
-    torch.device('cuda'),
-)
-output = model(**batch.unpack())
-output = output[0][-1]
-labels = output.topk(topk_predictions).indices.cpu().numpy().astype(np.uint32)
-
-labels_with_description = pl.DataFrame({'ccs_id':labels}).join(ccs_data, how='left', on='ccs_id')
-for it, row in enumerate(labels_with_description.iter_rows()):
-    selector = f'{it})'
-    code = row[1]
-    description = row[2]
-    code = f'[{code}]' 
-    line = f'{selector: >3} {code: <7} {description} - {row[0]}'
-    print(line)
-
-index_to_explain = input('What do you want to explain? ')
-index_to_explain = int(index_to_explain)
-ccs_to_explain = labels[index_to_explain]
-
-# Black Box Predictions
-
-labels = np.empty((len(neigh_icd), ), dtype=np.bool_)
-cursor = 0
-while cursor < len(neigh_icd):
-    new_cursor = min(cursor+batch_size, len(neigh_icd))
-    batch   = prepare_batch_for_inference (
-        neigh_icd      [cursor:new_cursor],
-        neigh_counts   [cursor:new_cursor],
-        neigh_positions[cursor:new_cursor],
-        torch.device('cuda')
+for reference in tqdm(range(num_references), leave=False):
+    # Find closest neighbours in the real data
+    distance_list = gen.compute_patients_distances (
+        icd_codes_eval[reference],
+        counts_eval[reference],
+        icd_codes_train,
+        counts_train,
+        0, # this is unused for now
     )
-    outputs = model(**batch.unpack())
-    outputs = [x[-1] for x in outputs]
-    outputs = torch.stack(outputs)
-    batch_labels = outputs.topk(topk_predictions, dim=-1).indices
-    batch_labels = torch.any(batch_labels == ccs_to_explain, dim=-1)
-    batch_labels = batch_labels.cpu().numpy()
+    topk = np.argpartition(distance_list, k_reals-1)[:k_reals]
 
-    labels[cursor:new_cursor] = batch_labels
-    cursor = new_cursor
+    neigh_icd       = []
+    neigh_ccs       = []
+    neigh_counts    = []
+    neigh_positions = []
+    for it in range(k_reals):
+        neigh_icd      .append(icd_codes_train[topk[it]])
+        neigh_ccs      .append(ccs_codes_train[topk[it]])
+        neigh_counts   .append(counts_train   [topk[it]])
+        neigh_positions.append(positions_train[topk[it]])
 
-# Tree fitting
+    # augment the neighbours with some synthetic points
 
-tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
+    displacements, new_counts = gen.independent_perturbation(neigh_icd, neigh_counts, synthetic_multiply_factor, keep_prob)
 
-# @todo add appropriate args
-tree_classifier = DecisionTreeClassifier()
+    neigh_counts = new_counts
+    new_neigh_icd       = []
+    new_neigh_ccs       = []
+    new_neigh_counts    = []
+    new_neigh_positions = []
+    for it, (icd, ccs, pos) in enumerate(zip(neigh_icd, neigh_ccs, neigh_positions)):
+        for jt in range(synthetic_multiply_factor):
+            displ = displacements[synthetic_multiply_factor * it + jt]
+            new_neigh_icd      .append(icd[displ])
+            new_neigh_ccs      .append(ccs[displ])
+            new_neigh_positions.append(pos[displ])
+    neigh_icd       = new_neigh_icd
+    neigh_ccs       = new_neigh_ccs
+    neigh_positions = new_neigh_positions
 
-train_split = int(tree_train_fraction * len(labels))
+    # Choose result to explain
 
-tree_inputs_train = tree_inputs[:train_split]
-tree_inputs_eval  = tree_inputs[train_split:]
-labels_train      = labels[:train_split]
-labels_eval       = labels[train_split:]
+    batch = prepare_batch_for_inference(
+        [icd_codes_eval[reference]],
+        [counts_eval[reference]],
+        [positions_eval[reference]],
+        torch.device('cuda'),
+    )
+    output = model(**batch.unpack())
+    output = output[0][-1]
+    labels = output.topk(topk_predictions).indices.cpu().numpy().astype(np.uint32)
 
-tree_classifier.fit(tree_inputs_train, labels_train)
-outputs = tree_classifier.predict(tree_inputs_eval)
-accuracy = (outputs == labels_eval).sum() / len(outputs)
-print(f'accuracy is {accuracy*100:.2f}%')
+    # @debug
+    # ccs_to_explain = choose_ccs_to_explain(labels, ccs_data)
+    # @debug
+    id_to_explain = random.randrange(0, len(labels))
+    ccs_to_explain = labels[id_to_explain]
 
-# Extract explanation
+    # Black Box Predictions
 
-feature_importances = tree_classifier.feature_importances_
-top_important_features = np.argpartition(- np.abs(feature_importances), range(num_top_important_features))
-top_important_features = top_important_features[:num_top_important_features]
-importances = feature_importances[top_important_features]
+    labels = np.empty((len(neigh_icd), ), dtype=np.bool_)
+    cursor = 0
+    while cursor < len(neigh_icd):
+        new_cursor = min(cursor+batch_size, len(neigh_icd))
+        batch   = prepare_batch_for_inference (
+            neigh_icd      [cursor:new_cursor],
+            neigh_counts   [cursor:new_cursor],
+            neigh_positions[cursor:new_cursor],
+            torch.device('cuda')
+        )
+        outputs = model(**batch.unpack())
+        if any([len(x) == 0 for x in outputs]):
+            breakpoint()
+        outputs = [x[-1] for x in outputs]
+        outputs = torch.stack(outputs)
+        batch_labels = outputs.topk(topk_predictions, dim=-1).indices
+        batch_labels = torch.any(batch_labels == ccs_to_explain, dim=-1)
+        batch_labels = batch_labels.cpu().numpy()
 
-# Present the result to the user
+        labels[cursor:new_cursor] = batch_labels
+        cursor = new_cursor
 
-df = pl.DataFrame({'ccs_id':top_important_features.astype(np.uint32), 'importance':importances})
-df = df.join(ccs_data, how='left', on='ccs_id')
+    top_important_features, importances, accuracy, f1_score = explain_label(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction)
+    # @debug
+    # print(f'accuracy is {accuracy*100:.2f}%')
 
-for it, row in enumerate(df.iter_rows()):
-    importance = row[1]
-    code = row[2]
-    description = row[3]
+    # @debug
+    total_accuracy += accuracy
+    total_f1_score += f1_score
 
-    pos  = f'{it+1})'
-    code = f'[{code}]'
-    line = f'{pos: <4}{importance: <7.3f} {code: <8} {description}'
-    print(line)
+    # Present the result to the user
 
+    df = pl.DataFrame({'ccs_id':top_important_features.astype(np.uint32), 'importance':importances})
+    df = df.join(ccs_data, how='left', on='ccs_id')
+
+    # @debug
+    # for it, row in enumerate(df.iter_rows()):
+    #     importance = row[1]
+    #     code = row[2]
+    #     description = row[3]
+
+    #     pos  = f'{it+1})'
+    #     code = f'[{code}]'
+    #     line = f'{pos: <4}{importance: <7.3f} {code: <8} {description}'
+    #     print(line)
+
+accuracy = total_accuracy / num_references
+f1_score = total_f1_score / num_references
+print(f'avg accuracy: {accuracy*100:.4f}%')
+print(f'avg f1_score: {f1_score*100:.4f}%')

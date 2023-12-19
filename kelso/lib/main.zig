@@ -597,12 +597,20 @@ fn independent_perturb_patient(patient: [][]u32, keep_prob: f32, allocator: std.
     const new_visits = allocator.alloc([]bool, patient.len) catch unreachable;
     var num_taken: usize = 0;
     for (patient, new_visits) |visit, *new_visit| {
+        if (visit.len == 0) @panic("we cannot have empty visits in input");
         new_visit.* = allocator.alloc(bool, visit.len) catch unreachable;
+        var num_visit_taken: usize = 0;
         for (new_visit.*) |*it| {
             const r = rng.float(f32);
             it.* = r < keep_prob;
-            if (it.*) num_taken += 1;
+            if (it.*) num_visit_taken += 1;
         }
+        // @todo @debug instead of taking an empty visit, we default to taking the first code
+        if (num_visit_taken == 0) {
+            num_visit_taken = 1;
+            new_visit.*[0] = true;
+        }
+        num_taken += num_visit_taken;
     }
 
     const ids = np.simple_new(1, @ptrCast(&num_taken), Np.Types.UINT) orelse unreachable;
@@ -617,7 +625,7 @@ fn independent_perturb_patient(patient: [][]u32, keep_prob: f32, allocator: std.
         for (new_visit) |taken| {
             if (taken) {
                 ids_data[cursor] = source_cursor;
-                cursor += 1;
+                cursor  += 1;
                 counter += 1;
             }
             source_cursor += 1;

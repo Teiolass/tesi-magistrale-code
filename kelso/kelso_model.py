@@ -288,16 +288,12 @@ class Kelso_Pooling(nn.Module):
         pooling_score = pooling_score.reshape(-1, h)
 
         sums = torch.zeros((bsz * b_m, h), device=batch.device)
-        # @debug
-        # sums = torch.index_add(sums, 0, ids, pooling_score)
         sums = sums.index_add_(0, ids, pooling_score)
         pooling_probs = pooling_score / sums[ids]
 
         # now pool
         batch = batch.reshape((-1, h)) * pooling_probs
         result = torch.zeros((bsz * b_m, h), device=batch.device)
-        # @debug
-        # result = torch.index_add(result, 0, ids, batch)
         result = result.index_add_(0, ids, batch)
         result = result.reshape((bsz, b_m, h))
 
