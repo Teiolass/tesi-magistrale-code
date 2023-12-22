@@ -12,10 +12,13 @@ from dataclasses import dataclass
 from typing import Self
 import os
 
-CFG_FILE_NAME = 'config.toml' # this is the one that is reported in the save dir
+CFG_FILE_NAME   = 'config.toml' # this is the one that is reported in the save dir
 MODEL_FILE_NAME = 'model.torch'
 
-__all__ = ['Kelso_Model', 'load_kelso_for_inference', 'prepare_batch_for_inference', 'Kelso_Config']
+__all__ = [
+    'Kelso_Filler', 'Kelso_Predictor', 'load_kelso_for_inference', 'prepare_batch_for_inference',
+    'Kelso_Config',
+]
 
 @dataclass(kw_only=True)
 class Kelso_Config:
@@ -98,7 +101,46 @@ class Kelso_Model(nn.Module):
             batch = layer(batch, positions, mask) 
         batch = F.dropout(batch, p=self.config.dropout, training=self.training)
 
-        # PHASE 4: extract output
+        return batch
+
+
+class Kelso_Filler(nn.Module):
+    def __init__(self, config: Kelso_Config):
+        super().__init__()
+        self.model  = Kelso_Model(config)
+        self.config = config
+        with torch.device(config.device):
+            self.head = nn.Linear(config.hidden_size, config.output_size, bias=True)
+
+    def forward (
+        self,
+        batch:     torch.Tensor,
+        positions: torch.LongTensor,
+        lengths:   torch.LongTensor,
+    ) -> list[torch.Tensor]:
+        batch = self.model(batch, positions, lengths)
+        result = self.head(batch)
+        return result
+
+    
+
+class Kelso_Predictor(nn.Module):
+    def __init__(self, config: Kelso_Config):
+        super().__init__()
+        self.config = config
+        self.model  = Kelso_Model(config)
+        with torch.device(config.device):
+            self.pooling = Kelso_Pooling(config)
+            self.head    = nn.Linear(config.hidden_size, config.output_size, bias=True)
+
+    def forward (
+        self,
+        batch:     torch.Tensor,
+        positions: torch.LongTensor,
+        lengths:   torch.LongTensor,
+    ) -> list[torch.Tensor]:
+        bsz = batch.shape[0]
+        batch = self.model(batch, positions, lengths)
 
         # this is of shape (bsz, b_m, hidden)
         batch_pooled = self.pooling(batch, positions, lengths)
@@ -108,10 +150,7 @@ class Kelso_Model(nn.Module):
         for it in range(bsz):
             t = output[it][:positions[it].max() + 1]
             result.append(t)
-
         return result
-
-
 
 # See this [article](http://arxiv.org/abs/2104.09864)
 class Rotary_Embedding:
@@ -351,7 +390,7 @@ def load_kelso_for_inference(path: str) -> Kelso_Model:
     config = tomlkit.parse(txt)['model']
     config = Kelso_Config(**config)
 
-    model = Kelso_Model(config) 
+    model = Kelso_Predictor(config) 
     state_dict = torch.load(model_path)
     model.load_state_dict(state_dict)
     return model

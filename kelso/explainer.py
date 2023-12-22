@@ -16,14 +16,15 @@ from tqdm import tqdm
 ontology_path  = 'data/processed/ontology.parquet'
 diagnoses_path = 'data/processed/diagnoses.parquet'
 ccs_path       = 'data/processed/ccs.parquet'
-model_path     = 'results/a-kelso2-xjdmk-2023-12-16_15:37:22'
+model_path     = 'results/kelso2-gopaf-2023-12-22_10:11:59/'
 
-k_reals        = 500
-batch_size     = 64
-keep_prob      = 0.8
-num_references = 10
-topk_predictions           = 30
-tree_train_fraction        = 0.8
+k_reals          = 200
+batch_size       = 64
+keep_prob        = 0.8
+num_references   = 200
+topk_predictions = 30
+augment_neighbours         = True
+tree_train_fraction        = 0.5
 num_top_important_features = 10
 synthetic_multiply_factor  = 10
 
@@ -146,22 +147,23 @@ for reference in tqdm(range(num_references), leave=False):
 
     # augment the neighbours with some synthetic points
 
-    displacements, new_counts = gen.independent_perturbation(neigh_icd, neigh_counts, synthetic_multiply_factor, keep_prob)
+    if augment_neighbours:
+        displacements, new_counts = gen.independent_perturbation(neigh_icd, neigh_counts, synthetic_multiply_factor, keep_prob)
 
-    neigh_counts = new_counts
-    new_neigh_icd       = []
-    new_neigh_ccs       = []
-    new_neigh_counts    = []
-    new_neigh_positions = []
-    for it, (icd, ccs, pos) in enumerate(zip(neigh_icd, neigh_ccs, neigh_positions)):
-        for jt in range(synthetic_multiply_factor):
-            displ = displacements[synthetic_multiply_factor * it + jt]
-            new_neigh_icd      .append(icd[displ])
-            new_neigh_ccs      .append(ccs[displ])
-            new_neigh_positions.append(pos[displ])
-    neigh_icd       = new_neigh_icd
-    neigh_ccs       = new_neigh_ccs
-    neigh_positions = new_neigh_positions
+        neigh_counts = new_counts
+        new_neigh_icd       = []
+        new_neigh_ccs       = []
+        new_neigh_counts    = []
+        new_neigh_positions = []
+        for it, (icd, ccs, pos) in enumerate(zip(neigh_icd, neigh_ccs, neigh_positions)):
+            for jt in range(synthetic_multiply_factor):
+                displ = displacements[synthetic_multiply_factor * it + jt]
+                new_neigh_icd      .append(icd[displ])
+                new_neigh_ccs      .append(ccs[displ])
+                new_neigh_positions.append(pos[displ])
+        neigh_icd       = new_neigh_icd
+        neigh_ccs       = new_neigh_ccs
+        neigh_positions = new_neigh_positions
 
     # Choose result to explain
 

@@ -14,7 +14,7 @@ from tqdm import tqdm
 import tomlkit
 from datetime import datetime
 
-from kelso_model import Kelso_Config, Kelso_Model, compute_loss, CFG_FILE_NAME, MODEL_FILE_NAME
+from kelso_model import Kelso_Config, Kelso_Predictor, compute_loss, CFG_FILE_NAME, MODEL_FILE_NAME
 
 CONFIG_FILE_PATH = 'repo/kelso/config.toml'
 
@@ -369,7 +369,7 @@ if __name__ == '__main__':
     config['model']['output_size'] = diagnoses['ccs_id'] .list.max().max() + 1
     kelso_config = Kelso_Config(**config['model'])
     kelso_config.device = torch.device(kelso_config.device)
-    model = Kelso_Model(kelso_config)
+    model = Kelso_Predictor(kelso_config)
 
     num_params  = sum([param.nelement()                      for param in model.parameters()])
     size_params = sum([param.nelement()*param.element_size() for param in model.parameters()])
