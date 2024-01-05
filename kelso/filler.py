@@ -109,7 +109,7 @@ class Early_Stopper:
 
     def __init__(self, patience: int, *, min_is_better: bool):
         self.best_result = 0.0
-        self.best_epoch  = None
+        self.best_epoch  = 0
         self.patience    = patience
         self.min_is_better = min_is_better
 
@@ -171,7 +171,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
         weight_decay = trainer_config.weight_decay,
     )
 
-    stopper = Early_Stopper(trainer_config.patience, min_is_better=True) 
+    stopper = Early_Stopper(trainer_config.patience, min_is_better=False) 
 
     best_epoch = -1
 
@@ -234,7 +234,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
             log_metrics(metrics, trainer_config)
 
             # The `min_is_better` field is relevant in constructor!!
-            stopper_result = stopper.check(epoch, metrics.eval_loss)
+            stopper_result = stopper.check(epoch, metrics.eval_masked_accuracy + metrics.eval_accuracy * 10)
 
             if stopper_result.is_best_round:
                 torch.save(model.state_dict(), model_save_path)

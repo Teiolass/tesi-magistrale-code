@@ -35,9 +35,10 @@ class Kelso_Config:
 
 
 class Kelso_Model(nn.Module):
-    def __init__(self, config: Kelso_Config):
+    def __init__(self, config: Kelso_Config, decoder_mask: bool):
         super().__init__()
         self.config = config
+        self.decoder_mask = decoder_mask
         with torch.device(config.device):
             self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
             rotary_embedding = Rotary_Embedding (
@@ -83,16 +84,20 @@ class Kelso_Model(nn.Module):
         # pad mask has dim (bsz, b_n)
 
         minus_inf = torch.finfo(torch.float).min
-        decoder_mask = torch.full((bsz, b_n, b_n), 0.0, device=self.config.device)
-        decoder_mask = decoder_mask.masked_fill_(positions.unsqueeze(2) < positions.unsqueeze(1), minus_inf)
 
         filter   = torch.arange(b_n, device=self.config.device).view((1, -1))
         pad_mask = torch.full((bsz, b_n), minus_inf, device=self.config.device)
         pad_mask = pad_mask.masked_fill_(filter < lengths.view((-1, 1)), 0)
 
-        decoder_mask = decoder_mask[:, None, :, :]
         pad_mask = pad_mask[:, None, None, :]
-        mask = pad_mask + decoder_mask
+
+        if self.decoder_mask:
+            decoder_mask = torch.full((bsz, b_n, b_n), 0.0, device=self.config.device)
+            decoder_mask = decoder_mask.masked_fill_(positions.unsqueeze(2) < positions.unsqueeze(1), minus_inf)
+            decoder_mask = decoder_mask[:, None, :, :]
+            mask = pad_mask + decoder_mask
+        else:
+            mask = pad_mask
 
         # PHASE 3: transformer
 
@@ -107,7 +112,7 @@ class Kelso_Model(nn.Module):
 class Kelso_Filler(nn.Module):
     def __init__(self, config: Kelso_Config):
         super().__init__()
-        self.model  = Kelso_Model(config)
+        self.model  = Kelso_Model(config, decoder_mask=False)
         self.config = config
         with torch.device(config.device):
             self.head = nn.Linear(config.hidden_size, config.output_size, bias=True)
@@ -128,7 +133,7 @@ class Kelso_Predictor(nn.Module):
     def __init__(self, config: Kelso_Config):
         super().__init__()
         self.config = config
-        self.model  = Kelso_Model(config)
+        self.model  = Kelso_Model(config, decoder_mask=True)
         with torch.device(config.device):
             self.pooling = Kelso_Pooling(config)
             self.head    = nn.Linear(config.hidden_size, config.output_size, bias=True)
