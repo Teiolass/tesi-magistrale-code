@@ -278,15 +278,6 @@ class Kelso_MLP(nn.Module):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
-def compute_loss(predictions, outputs) -> torch.Tensor:
-    losses = []
-    for pred, out in zip(predictions, outputs):
-        # if reduce='none' the function returns the same shape as input
-        loss = F.binary_cross_entropy_with_logits(pred, out, reduction='sum')
-        losses.append(loss)
-    total_loss = sum(losses)
-    return total_loss
-
 class Kelso_Pooling(nn.Module):
     def __init__(self, config: Kelso_Config):
         super().__init__()

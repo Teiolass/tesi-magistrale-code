@@ -14,22 +14,19 @@ from tqdm import tqdm
 import tomlkit
 from datetime import datetime
 
-from kelso_model import Kelso_Config, Kelso_Predictor, CFG_FILE_NAME, MODEL_FILE_NAME
+from kelso_model import Kelso_Config, Kelso_Filler, CFG_FILE_NAME, MODEL_FILE_NAME
 
-CONFIG_FILE_PATH = 'repo/kelso/config.toml'
+CONFIG_FILE_PATH = 'repo/kelso/filler_config.toml'
 
 LOG_FILE_NAME = 'log.txt'
 CSV_FILE_NAME = 'log.csv'
 
-def nice_print(txt: str):
-    tqdm.write(txt)
-
-@dataclass(kw_only=True)
-class Metrics_Config:
-    recalls: list[int]
 
 @dataclass(kw_only=True)
 class Trainer_Config:
+    hole_token_id: int
+    hole_prob: float
+
     batch_size:        int
     num_epochs:        int
     learning_rate:     float
@@ -43,27 +40,32 @@ class Trainer_Config:
     max_patient_len:   int # @todo
     limit_num_batches: int | None = None
 
-    # auto-filled
-    metrics_config: Metrics_Config | None = None
+def nice_print(txt: str):
+    tqdm.write(txt)
 
-@dataclass(kw_only=True)
+@dataclass
 class Epoch_Metrics:
-    epoch:      int
+    epoch: int
     learn_rate: float
     train_loss: float
-    eval_loss:  float
-    recalls:    dict[int, float]
+    eval_loss: float
+    eval_masked_loss: float
+    eval_masked_accuracy: float
+    eval_accuracy: float
 
-def log_metrics(metrics: Epoch_Metrics, trainer_config: Trainer_Config):
+def log_metrics(metrics: Epoch_Metrics, config: Trainer_Config):
     txt_file_path = os.path.join(trainer_config.save_directory, LOG_FILE_NAME)
     csv_file_path = os.path.join(trainer_config.save_directory, CSV_FILE_NAME)
 
-    txt  = f'{metrics.epoch: >3}. '
-    txt += f'train_loss: {metrics.train_loss:.3f}'
-    txt += f'   eval loss: {metrics.eval_loss:.3f}'
-    for k in trainer_config.metrics_config.recalls:
-        txt += f"    r{k}: {metrics.recalls[k]*100:.2f}%"
-    txt += f"   lr:{metrics.learn_rate:.3e}"
+    elems = [
+        f'{metrics.epoch: >3}.',
+        f'train_loss: {metrics.train_loss:.3f}',
+        f'eval_loss: {metrics.eval_loss:.3f}',
+        f'masked_loss: {metrics.eval_masked_loss:.3f}',
+        f'accuracy: {metrics.eval_accuracy:.3f}',
+        f'masked_accuracy: {metrics.eval_masked_accuracy:.3f}',
+    ]
+    txt = '   '.join(elems)
 
     nice_print(txt)
     with open(txt_file_path, 'a') as f:
@@ -72,26 +74,26 @@ def log_metrics(metrics: Epoch_Metrics, trainer_config: Trainer_Config):
     if metrics.epoch == 0:
         if os.path.exists(csv_file_path):
             raise Error(f'We are in epoch zero, but csv file {csv_file_path} already exists')
-        txt  = 'epoch,learn_rate,train_loss,eval_loss,'
-        txt += ','.join([f'recall_{k}' for k in sorted(metrics.recalls)]) 
+        txt  = 'epoch,learn_rate,train_loss,eval_loss,eval_masked_loss,accuracy,masked_accuracy'
         txt += '\n'
     else:
         txt = ''
 
-    values = [
-        metrics.epoch,
-        metrics.learn_rate,
-        metrics.train_loss,
-        metrics.eval_loss,
+    elems = [
+        f'{metrics.epoch}.',
+        f'{metrics.learn_rate:.3e}',
+        f'{metrics.train_loss:.6f}',
+        f'{metrics.eval_loss:.6f}',
+        f'{metrics.eval_masked_loss:.6f}',
+        f'{metrics.eval_accuracy:.6f}',
+        f'{metrics.eval_masked_accuracy:.6f}',
     ]
-    values += [metrics.recalls[k] for k in sorted(metrics.recalls)]
-    values  = [str(v) for v in values]
-    txt += ','.join(values)
+    txt += ','.join(elems)
     txt += '\n'
 
     with open(csv_file_path, 'a') as f:
         f.write(txt)
-
+    pass
 
 @dataclass(kw_only=True)
 class Early_Stopper_Result:
@@ -125,10 +127,14 @@ class Early_Stopper:
 
 @dataclass(kw_only=True)
 class Training_Results:
-    num_epochs: int
-    loss: int
-    recalls: dict[int, float]
-
+    num_epochs:           int
+    best_epoch:           int
+    train_loss:           float
+    eval_loss:            float
+    eval_masked_loss:     float
+    eval_masked_accuracy: float
+    eval_accuracy:        float
+    
 
 def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Config) -> Training_Results:
     def split(data):
@@ -154,8 +160,6 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
             f' but we are limiting it to {l_num_batches}'
         )
         num_batches = l_num_batches
-    else:
-        nice_print(f'dataset contains {num_batches} batches of {trainer_config.batch_size}')
 
     model_save_path = os.path.join(trainer_config.save_directory, MODEL_FILE_NAME)
 
@@ -167,6 +171,8 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     )
 
     stopper = Early_Stopper(trainer_config.patience, min_is_better=True) 
+
+    best_epoch = -1
 
     # Train Loop
 
@@ -186,7 +192,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
                 i_counts    = counts_train    [batch_start: batch_end]
 
                 b_codes, b_positions, b_lengths, outputs = prepare_data (
-                    i_ccs, i_input, i_positions, i_counts,
+                    i_ccs, i_input, i_positions, trainer_config, model.config.device
                 )
 
                 # feed-forward + backpropagation
@@ -204,7 +210,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
                 train_loss_divisor += divisor
 
             train_loss = total_train_loss / train_loss_divisor
-            metrics_dict = evaluate (
+            metrics_results = evaluate (
                 model,
                 ccs_eval,
                 input_eval,
@@ -217,8 +223,10 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
                 epoch      = epoch,
                 learn_rate = float(optimizer.param_groups[0]['lr']),
                 train_loss = train_loss,
-                eval_loss  = metrics_dict['loss'],
-                recalls    = metrics_dict['recalls']
+                eval_loss  = metrics_results.loss,
+                eval_masked_loss = metrics_results.masked_loss,
+                eval_masked_accuracy = metrics_results.masked_accuracy,
+                eval_accuracy =  metrics_results.accuracy
             )
             log_metrics(metrics, trainer_config)
 
@@ -227,6 +235,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
 
             if stopper_result.is_best_round:
                 torch.save(model.state_dict(), model_save_path)
+                best_epoch = epoch
 
             if stopper_result.should_exit:
                 nice_print('It seems we are done here...')
@@ -236,7 +245,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
 
 
     model.load_state_dict(torch.load(model_save_path))
-    metrics_dict = evaluate (
+    metrics = evaluate (
         model,
         ccs_test,
         input_test,
@@ -246,11 +255,14 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     )
     training_results = Training_Results (
         num_epochs = epoch,
-        loss       = metrics_dict['loss'],
-        recalls    = metrics_dict['recalls'],
+        best_epoch = best_epoch,
+        train_loss = train_loss,
+        eval_loss  = metrics_results.loss,
+        eval_masked_loss = metrics_results.masked_loss,
+        eval_masked_accuracy = metrics_results.masked_accuracy,
+        eval_accuracy =  metrics_results.accuracy
     )
     return training_results
-
 
 def evaluate (
     model: nn.Module,
@@ -260,13 +272,7 @@ def evaluate (
     counts:    list[np.ndarray],
     config:    Trainer_Config,
 ):
-    # prepare the metrics dict
-    metrics = {}
-    metrics['loss'] = 0
-    metrics['recalls'] = {}
-    for k in config.metrics_config.recalls:
-        metrics['recalls'][k] = 0
-    divisor = 0
+    metrics_results_acc = Metrics_Results_Partial (0, 0, 0, 0, 0, 0)
 
     num_batches = len(ccs_codes) // config.eval_batch_size
     for batch_id in tqdm(range(num_batches), ' eval', leave=False):
@@ -280,81 +286,106 @@ def evaluate (
         i_counts    = counts    [batch_start: batch_end]
 
         b_codes, b_positions, b_lengths, outputs = prepare_data (
-            i_ccs, i_icd, i_positions, i_counts,
+            i_ccs, i_icd, i_positions, trainer_config, model.config.device
         )
+
+        mask = b_codes == config.hole_token_id
 
         # computations
         model.eval()
         with torch.inference_mode():
             predictions = model(b_codes, b_positions, b_lengths)
-            m = compute_metrics(predictions, outputs, config.metrics_config)
-        metrics['loss'] += m['loss']
-        for k in config.metrics_config.recalls:
-            metrics['recalls'][k] += m['recalls'][k]
-        divisor += sum([x.shape[0] for x in predictions])
+            m = compute_metrics(predictions, outputs, mask)
+        
+        metrics_results_acc.total_loss            = m.total_loss
+        metrics_results_acc.total_masked_loss     = m.total_masked_loss
+        metrics_results_acc.total_accuracy        = m.total_accuracy
+        metrics_results_acc.total_masked_accuracy = m.total_masked_accuracy
+        metrics_results_acc.divisor               = m.divisor
+        metrics_results_acc.masked_divisor        = m.masked_divisor
 
-    metrics['loss'] /= divisor
-    for k in config.metrics_config.recalls:
-        metrics['recalls'][k] /= num_batches
-    return metrics
+    mra = metrics_results_acc
+    return Metrics_Results (
+        loss            = mra.total_loss            / mra.divisor,
+        accuracy        = mra.total_accuracy        / mra.divisor,
+        masked_loss     = mra.total_masked_loss     / mra.masked_divisor if mra.masked_divisor > 0 else 0.0,
+        masked_accuracy = mra.total_masked_accuracy / mra.masked_divisor if mra.masked_divisor > 0 else 0.0,
+    )
 
-def compute_loss(predictions, outputs) -> torch.Tensor:
-    losses = []
-    for pred, out in zip(predictions, outputs):
-        # if reduce='none' the function returns the same shape as input
-        loss = F.binary_cross_entropy_with_logits(pred, out, reduction='sum')
-        losses.append(loss)
-    total_loss = sum(losses)
-    return total_loss
+@dataclass
+class Metrics_Results:
+    loss:            float
+    masked_loss:     float
+    accuracy:        float
+    masked_accuracy: float
 
+@dataclass
+class Metrics_Results_Partial:
+    total_loss:            float
+    total_masked_loss:     float
+    total_accuracy:        float
+    total_masked_accuracy: float
+    divisor:               int
+    masked_divisor:        int
 
-def compute_metrics (predictions: list[torch.Tensor], outputs: list[torch.Tensor], config: Metrics_Config):
-    metrics = {}
-    metrics['loss'] = float(compute_loss(predictions, outputs))
-    metrics['recalls'] = {}
-    for k in config.recalls:
-        rec = []
-        for pred, out in zip(predictions, outputs):
-            # create shifter to index the flatten array
-            t = torch.ones(out.shape[0], dtype=int, device=out.device) * out.shape[-1]
-            t[0] = 0
-            t = t.cumsum(0).unsqueeze(1)
+def compute_metrics (
+    predictions: list[torch.Tensor],
+    targets:     list[torch.Tensor],
+    mask:        list[torch.Tensor],
+) -> Metrics_Results_Partial:
+    predictions = predictions.reshape((-1, predictions.shape[-1]))
+    targets     = targets.flatten()
+    mask        = mask.flatten()
 
-            sel = pred.topk(k, dim=-1).indices
-            tp = out.flatten()[sel+t].sum(-1).to(float) # true positives
-            tt = out.sum(-1)
-            recall = (tp / tt).mean()
-            rec.append(float(recall))
-        metrics['recalls'][k] = sum(rec) / len(rec)
-    return metrics
+    cross_entropy = F.cross_entropy(predictions, targets, ignore_index=-1, reduction='none')
+    total_loss  = cross_entropy[targets != -1].sum()
+    masked_loss = cross_entropy[mask].sum()
 
+    divisor = (targets != -1).sum()
+    masked_divisor = mask.sum()
 
-def prepare_data(i_ccs, i_input, i_positions, i_counts):
-    # prepare the data for the model
-    b_input     = [x[:-int(c[-1])]                 for x, c in zip(i_input,     i_counts)]
-    b_positions = [x[:-int(c[-1])].astype(np.int_) for x, c in zip(i_positions, i_counts)]
+    predictions = F.softmax(predictions, dim=-1)
+    correct_predictions = predictions.gather(1, targets.clamp(0, None).unsqueeze(1))
+
+    total_accuracy  = correct_predictions[targets != -1].sum()
+    masked_accuracy = correct_predictions[mask].sum()
+
+    return Metrics_Results_Partial (
+        total_loss            = float(total_loss),
+        total_masked_loss     = float(masked_loss),
+        total_accuracy        = float(total_accuracy),
+        total_masked_accuracy = float(masked_accuracy),
+        divisor               = int(divisor),
+        masked_divisor        = int(masked_divisor),
+    )
+
+def compute_loss(predictions, targets):
+    predictions = predictions.reshape((-1, predictions.shape[-1]))
+    targets     = targets.flatten()
+    return F.cross_entropy(predictions, targets, ignore_index=-1, reduction='sum')
+
+def prepare_data(b_ccs, b_input, b_positions, trainer_config: Trainer_Config, device):
     lengths = [len(x) for x in b_input]
     b_n     = max(lengths)
-    b_input     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in b_input]).astype(np.int64)
-    b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in b_positions])
-    # @todo this relies on the global model variable
-    b_input     = torch.from_numpy(b_input)    .to(model.config.device)
-    b_positions = torch.from_numpy(b_positions).to(model.config.device)
-    b_lengths   = torch.LongTensor(lengths)    .to(model.config.device)
+    b_input     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in b_input])
+    b_ccs       = np.array([np.pad(x.astype(int), (0, b_n - len(x)), constant_values=-1) for x in b_ccs])
+    b_positions = np.array([np.pad(x.astype(int), (0, b_n - len(x)), constant_values=-1) for x in b_positions])
 
-    # compute expected outputs for the loss
-    outputs = []
-    for it in range(b_input.shape[0]): # this is range(batch_size)
-        sz = len(i_counts[it])
-        out = np.zeros((sz-1, model.config.output_size), dtype=float)
-        cursor = i_counts[it][0]
-        for jt in range(1, sz):
-            cursor_end = cursor + i_counts[it][jt]
-            out[jt-1, i_ccs[it][cursor:cursor_end]] = 1
-            cursor = cursor_end
-        out = torch.from_numpy(out).to(torch.float).to(model.config.device)
-        outputs.append(out)
-    return b_input, b_positions, b_lengths, outputs
+
+    # tweak input with holes
+    mask = np.random.rand(*b_input.shape) < trainer_config.hole_prob
+    b_input[mask] = trainer_config.hole_token_id
+    b_ccs       = torch.from_numpy(b_ccs)
+    b_positions = torch.from_numpy(b_positions)
+    b_input     = torch.from_numpy(b_input.astype(np.int64))
+    b_lengths   = torch.LongTensor(lengths)
+
+    b_positions = b_positions.to(device)
+    b_input     = b_input    .to(device)
+    b_lengths   = b_lengths  .to(device)
+    b_ccs       = b_ccs      .to(device)
+
+    return b_input, b_positions, b_lengths, b_ccs
 
 DIR_ID_LENGTH = 5
 ALL_LETTERS   = 'abcdefghijklmnopqrstuvxywz'
@@ -375,18 +406,17 @@ if __name__ == '__main__':
     diagnoses = pl.read_parquet(config['diagnoses_path'])
 
     config['model']['vocab_size']  = diagnoses['icd9_id'].list.max().max() + 1
-    config['model']['output_size'] = diagnoses['ccs_id'] .list.max().max() + 1
+    config['model']['output_size'] = diagnoses['ccs_id'] .list.max().max() + 2 # this is for the hole code
+    config['trainer']['hole_token_id'] = config['model']['vocab_size'] - 1
     kelso_config = Kelso_Config(**config['model'])
     kelso_config.device = torch.device(kelso_config.device)
-    model = Kelso_Predictor(kelso_config)
+    model = Kelso_Filler(kelso_config)
 
     num_params  = sum([param.nelement()                      for param in model.parameters()])
     size_params = sum([param.nelement()*param.element_size() for param in model.parameters()])
     nice_print(f'model has {num_params/1e6:.2f}M params, occupying {size_params/1024/1024:.2f}M of memory')
 
     trainer_config = Trainer_Config(**config['trainer'])
-    metrics_config = Metrics_Config(**config['metrics'])
-    trainer_config.metrics_config = metrics_config
 
     trainer_config.save_directory = format_path(trainer_config.save_directory) 
     nice_print(f'> Save directory is {trainer_config.save_directory}')
@@ -394,8 +424,6 @@ if __name__ == '__main__':
 
     num_patients_before = diagnoses.shape[0]
     diagnoses = diagnoses.filter(pl.col('count').list.sum() < trainer_config.max_patient_len)
-    # @debug
-    # diagnoses = diagnoses.filter(pl.col('count').list.lengths() > 2)
     num_patients_after = diagnoses.shape[0]
     nice_print (
         f'Original dataset contains {num_patients_before} patients. We cut '
@@ -430,11 +458,13 @@ if __name__ == '__main__':
 
     # add test data to toml document
     test_results = tomlkit.table()
-    test_results['training_epochs'] = results.num_epochs
-    test_results['loss'] = results.loss
-    for k in sorted(metrics_config.recalls):
-        test_results[f'recall_{k}'] = results.recalls[k]
-    config['test_results'] = test_results
+    test_results['training_epochs']      = results.num_epochs
+    test_results['best_epoch']           = results.best_epochs
+    test_results['train_loss']           = results.train_loss
+    test_results['eval_loss']            = results.eval_loss
+    test_results['eval_masked_loss']     = results.eval_masked_loss
+    test_results['eval_masked_accuracy'] = results.eval_masked_accuracy
+    test_results['eval_accuracy']        = results.eval_accuracy
 
     # save new results on config file
     new_config_text = tomlkit.dumps(config)
