@@ -26,6 +26,7 @@ CSV_FILE_NAME = 'log.csv'
 class Trainer_Config:
     hole_token_id: int
     hole_prob: float
+    masked_loss_gamma: float
 
     batch_size:        int
     num_epochs:        int
@@ -199,15 +200,17 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
                 optimizer.zero_grad()
                 model.train()
                 predictions = model(b_codes, b_positions, b_lengths)
-                total_loss  = compute_loss(predictions, outputs)
-                divisor     = sum([x.shape[0] for x in predictions])
-                loss        = total_loss / divisor
+                mask = b_codes == trainer_config.hole_token_id
+                total_loss, masked_loss = compute_loss(predictions, outputs, mask)
+
+                loss = total_loss + trainer_config.masked_loss_gamma * masked_loss
+                
                 loss.backward()
 
                 optimizer.step()
 
-                total_train_loss   += float(total_loss)
-                train_loss_divisor += divisor
+                total_train_loss   += float(loss)
+                train_loss_divisor += 1
 
             train_loss = total_train_loss / train_loss_divisor
             metrics_results = evaluate (
@@ -359,10 +362,20 @@ def compute_metrics (
         masked_divisor        = int(masked_divisor),
     )
 
-def compute_loss(predictions, targets):
+def compute_loss(predictions, targets, mask):
     predictions = predictions.reshape((-1, predictions.shape[-1]))
     targets     = targets.flatten()
-    return F.cross_entropy(predictions, targets, ignore_index=-1, reduction='sum')
+    mask        = mask.flatten()
+
+    cross_entropy = F.cross_entropy(predictions, targets, ignore_index=-1, reduction='none')
+
+    divisor = (targets != -1).sum()
+    masked_divisor = mask.sum()
+
+    total_loss  = cross_entropy[targets != -1].sum() / divisor
+    masked_loss = cross_entropy[mask].sum() / masked_divisor
+
+    return total_loss, masked_loss
 
 def prepare_data(b_ccs, b_input, b_positions, trainer_config: Trainer_Config, device):
     lengths = [len(x) for x in b_input]
@@ -459,7 +472,7 @@ if __name__ == '__main__':
     # add test data to toml document
     test_results = tomlkit.table()
     test_results['training_epochs']      = results.num_epochs
-    test_results['best_epoch']           = results.best_epochs
+    test_results['best_epoch']           = results.best_epoch
     test_results['train_loss']           = results.train_loss
     test_results['eval_loss']            = results.eval_loss
     test_results['eval_masked_loss']     = results.eval_masked_loss
@@ -472,9 +485,14 @@ if __name__ == '__main__':
         f.write(new_config_text)
 
     # print the test results on screen
-    txt = [f'test loss: {results.loss:.3f}']
-    for k in sorted(metrics_config.recalls):
-        txt += [f'recall_{k: <2}: {results.recalls[k]*100:.2f}%']
-    txt = '    '.join(txt)
+    elems = [
+        f'best_epoch: {results.best_epoch}',
+        f'train_loss: {results.train_loss:.3f}',
+        f'eval_loss: {results.eval_loss:.3f}',
+        f'masked_loss: {results.eval_masked_loss:.3f}',
+        f'accuracy: {results.eval_accuracy:.3f}',
+        f'masked_accuracy: {results.eval_masked_accuracy:.3f}',
+    ]
+    txt = '   '.join(elems)
     nice_print(txt)
 

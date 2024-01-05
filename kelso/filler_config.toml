@@ -11,18 +11,19 @@ device      = 'cuda'
 mlp_intermediate_size = 1024
 
 [trainer]
-hole_prob       = 0.2
-batch_size      = 32
-num_epochs      = 1000
-learning_rate   = 4e-4
-max_patient_len = 150
-eval_split      = 0.15
-test_split      = 0.15
-weight_decay    = 0.05
-eval_batch_size = 64
-ccs_as_inputs   = false
-patience        = 10
-save_directory  = 'results/filler-%(id)-%(date)/'
+hole_prob         = 0.1
+masked_loss_gamma = 30
+batch_size        = 32
+num_epochs        = 1000
+learning_rate     = 4e-4
+max_patient_len   = 150
+eval_split        = 0.15
+test_split        = 0.15
+weight_decay      = 0.05
+eval_batch_size   = 64
+ccs_as_inputs     = false
+patience          = 10
+save_directory    = 'results/filler-%(id)-%(date)/'
 # limit_num_batches = 3
 
 [metrics]
