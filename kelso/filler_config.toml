@@ -12,9 +12,10 @@ mlp_intermediate_size = 1024
 
 [trainer]
 hole_prob         = 0.05
+num_test_rounds   = 30
 masked_loss_gamma = 100
 batch_size        = 32
-num_epochs        = 1000
+num_epochs        = 8000
 learning_rate     = 1e-4
 max_patient_len   = 150
 eval_split        = 0.15
@@ -22,12 +23,9 @@ test_split        = 0.15
 weight_decay      = 0.05
 eval_batch_size   = 64
 ccs_as_inputs     = false
-patience          = 50
+patience          = 5000
 save_directory    = 'results/filler-%(id)-%(date)/'
 # limit_num_batches = 3
-
-[metrics]
-recalls = [5, 10, 20, 30]
 
 
 

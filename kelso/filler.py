@@ -27,6 +27,7 @@ class Trainer_Config:
     hole_token_id: int
     hole_prob: float
     masked_loss_gamma: float
+    num_test_rounds: int
 
     batch_size:        int
     num_epochs:        int
@@ -174,6 +175,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     stopper = Early_Stopper(trainer_config.patience, min_is_better=False) 
 
     best_epoch = -1
+    best_train_loss = -1
 
     # Train Loop
 
@@ -239,6 +241,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
             if stopper_result.is_best_round:
                 torch.save(model.state_dict(), model_save_path)
                 best_epoch = epoch
+                best_train_loss = train_loss
 
             if stopper_result.should_exit:
                 nice_print('It seems we are done here...')
@@ -255,15 +258,16 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
         positions_test,
         counts_test,
         trainer_config,
+        num_rounds = trainer_config.num_test_rounds,
     )
     training_results = Training_Results (
         num_epochs = epoch,
         best_epoch = best_epoch,
-        train_loss = train_loss,
-        eval_loss  = metrics_results.loss,
-        eval_masked_loss = metrics_results.masked_loss,
-        eval_masked_accuracy = metrics_results.masked_accuracy,
-        eval_accuracy =  metrics_results.accuracy
+        train_loss = best_train_loss,
+        eval_loss  = metrics.loss,
+        eval_masked_loss = metrics.masked_loss,
+        eval_masked_accuracy = metrics.masked_accuracy,
+        eval_accuracy =  metrics.accuracy
     )
     return training_results
 
@@ -274,38 +278,41 @@ def evaluate (
     positions: list[np.ndarray],
     counts:    list[np.ndarray],
     config:    Trainer_Config,
+    *,
+    num_rounds: int = 1,
 ):
     metrics_results_acc = Metrics_Results_Partial (0, 0, 0, 0, 0, 0)
 
     num_batches = len(ccs_codes) // config.eval_batch_size
-    for batch_id in tqdm(range(num_batches), ' eval', leave=False):
-        batch_start = batch_id * config.eval_batch_size
-        batch_end   = batch_start + config.eval_batch_size
+    for _ in range(num_rounds):
+        for batch_id in range(num_batches):
+            batch_start = batch_id * config.eval_batch_size
+            batch_end   = batch_start + config.eval_batch_size
 
-        # get the right data for the batch
-        i_icd       = icd_codes [batch_start: batch_end]
-        i_ccs       = ccs_codes [batch_start: batch_end]
-        i_positions = positions [batch_start: batch_end]
-        i_counts    = counts    [batch_start: batch_end]
+            # get the right data for the batch
+            i_icd       = icd_codes [batch_start: batch_end]
+            i_ccs       = ccs_codes [batch_start: batch_end]
+            i_positions = positions [batch_start: batch_end]
+            i_counts    = counts    [batch_start: batch_end]
 
-        b_codes, b_positions, b_lengths, outputs = prepare_data (
-            i_ccs, i_icd, i_positions, trainer_config, model.config.device
-        )
+            b_codes, b_positions, b_lengths, outputs = prepare_data (
+                i_ccs, i_icd, i_positions, trainer_config, model.config.device
+            )
 
-        mask = b_codes == config.hole_token_id
+            mask = b_codes == config.hole_token_id
 
-        # computations
-        model.eval()
-        with torch.inference_mode():
-            predictions = model(b_codes, b_positions, b_lengths)
-            m = compute_metrics(predictions, outputs, mask)
-        
-        metrics_results_acc.total_loss            = m.total_loss
-        metrics_results_acc.total_masked_loss     = m.total_masked_loss
-        metrics_results_acc.total_accuracy        = m.total_accuracy
-        metrics_results_acc.total_masked_accuracy = m.total_masked_accuracy
-        metrics_results_acc.divisor               = m.divisor
-        metrics_results_acc.masked_divisor        = m.masked_divisor
+            # computations
+            model.eval()
+            with torch.inference_mode():
+                predictions = model(b_codes, b_positions, b_lengths)
+                m = compute_metrics(predictions, outputs, mask)
+            
+            metrics_results_acc.total_loss            = m.total_loss
+            metrics_results_acc.total_masked_loss     = m.total_masked_loss
+            metrics_results_acc.total_accuracy        = m.total_accuracy
+            metrics_results_acc.total_masked_accuracy = m.total_masked_accuracy
+            metrics_results_acc.divisor               = m.divisor
+            metrics_results_acc.masked_divisor        = m.masked_divisor
 
     mra = metrics_results_acc
     return Metrics_Results (
