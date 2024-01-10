@@ -35,6 +35,12 @@ const module_methods = [_]py.PyMethodDef{
         .ml_flags = py.METH_VARARGS,
         .ml_doc = "",
     },
+    .{
+        .ml_name = "ontological_perturbation",
+        .ml_meth = _ontological_perturbation,
+        .ml_flags = py.METH_VARARGS,
+        .ml_doc = "",
+    },
     // this one is just a sentinel
     std.mem.zeroes(py.PyMethodDef),
 };
@@ -149,6 +155,27 @@ export fn _independent_perturbation(self_obj: ?*py.PyObject, args: ?*py.PyObject
     return result;
 }
 
+export fn _ontological_perturbation(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
+    _ = self_obj;
+    var arg1: ?*py.PyObject = undefined;
+    var arg2: ?*py.PyObject = undefined;
+    var arg3: c_int = undefined;
+    var arg4: f32 = undefined;
+
+    if (py.PyArg_ParseTuple(args, "OOlf", &arg1, &arg2, &arg3, &arg4) == 0) return null;
+
+    const keep_prob: f32 = arg4;
+    const multiply_factor: usize = @intCast(arg3);
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const dataset = parse_list_of_patients(arg1, arg2, allocator) orelse return null;
+    const result = ontological_perturbation(dataset, multiply_factor, keep_prob, ontology);
+
+    return result;
+}
 const Table_c2c = struct {
     table: []f32,
     w: usize,
@@ -588,6 +615,36 @@ fn independent_perturbation(dataset: [][][]u32, multiply_factor: usize, keep_pro
     return return_tuple;
 }
 
+fn ontological_perturbation(dataset: [][][]u32, multiply_factor: usize, keep_prob: f32, _ontology: []u32) *py.PyObject {
+    var ids_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
+    var counts_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var _rng = std.rand.DefaultPrng.init(42);
+    var rng = _rng.random();
+
+    for (dataset, 0..) |patient, it| {
+        for (0..multiply_factor) |jt| {
+            const new_patient = ontological_perturb_patient(patient, keep_prob, _ontology, allocator, rng);
+            const list_id: isize = @intCast(multiply_factor * it + jt);
+            py.PyList_SET_ITEM(ids_list, list_id, new_patient.ids);
+            py.PyList_SET_ITEM(counts_list, list_id, new_patient.counts);
+            _ = arena.reset(.retain_capacity);
+        }
+    }
+
+    const return_tuple = blk: {
+        var tuple = py.PyTuple_New(2);
+        _ = py.PyTuple_SetItem(tuple, 0, ids_list);
+        _ = py.PyTuple_SetItem(tuple, 1, counts_list);
+        break :blk tuple;
+    };
+    return return_tuple;
+}
+
 const Numpy_Patient = struct {
     ids: *py.PyObject,
     counts: *py.PyObject,
@@ -606,6 +663,74 @@ fn independent_perturb_patient(patient: [][]u32, keep_prob: f32, allocator: std.
             if (it.*) num_visit_taken += 1;
         }
         // @todo @debug instead of taking an empty visit, we default to taking the first code
+        if (num_visit_taken == 0) {
+            num_visit_taken = 1;
+            new_visit.*[0] = true;
+        }
+        num_taken += num_visit_taken;
+    }
+
+    const ids = np.simple_new(1, @ptrCast(&num_taken), Np.Types.UINT) orelse unreachable;
+    const counts = np.simple_new(1, @constCast(@ptrCast(&patient.len)), Np.Types.UINT) orelse unreachable;
+    const ids_data: [*]u32 = @ptrCast(@alignCast(@as(*Np.Array_Obj, @ptrCast(ids)).data));
+    const counts_data: [*]u32 = @ptrCast(@alignCast(@as(*Np.Array_Obj, @ptrCast(counts)).data));
+
+    var cursor: usize = 0;
+    var source_cursor: u32 = 0;
+    for (new_visits, counts_data) |new_visit, *count| {
+        var counter: u32 = 0;
+        for (new_visit) |taken| {
+            if (taken) {
+                ids_data[cursor] = source_cursor;
+                cursor  += 1;
+                counter += 1;
+            }
+            source_cursor += 1;
+        }
+        count.* = counter;
+    }
+
+    return Numpy_Patient{
+        .ids = ids,
+        .counts = counts,
+    };
+}
+
+fn is_in(array: []u32, val: u32) bool {
+    for (array) |it| {
+        if (it == val) return true;
+    }
+    return false;
+}
+
+fn ontological_perturb_patient(patient: [][]u32, keep_prob: f32, _ontology: []u32, allocator: std.mem.Allocator, rng: std.rand.Random) Numpy_Patient {
+    const new_visits = allocator.alloc([]bool, patient.len) catch unreachable;
+    var num_taken: usize = 0;
+
+    var masked_parents = std.ArrayList(u32).initCapacity(allocator, patient.len) catch unreachable;
+
+    for (patient, new_visits) |visit, *new_visit| {
+        if (visit.len == 0) @panic("we cannot have empty visits in input");
+        new_visit.* = allocator.alloc(bool, visit.len) catch unreachable;
+
+        var num_visit_taken: usize = 0;
+
+        for (visit, new_visit.*) |c, *it| {
+            const p = _ontology[c];
+            if (is_in(masked_parents.items, p)) {
+                it.* = false;
+            } else {
+                const r = rng.float(f32);
+                it.* = r < keep_prob;
+                if (it.*) {
+                    num_visit_taken += 1;
+                }
+                else masked_parents.append(p) catch unreachable;
+            }
+        }
+
+        // @todo instead of taking an empty visit, we default to taking the first code
+        // This should *almost* never happen
         if (num_visit_taken == 0) {
             num_visit_taken = 1;
             new_visit.*[0] = true;
