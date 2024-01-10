@@ -21,7 +21,7 @@ model_path     = 'results/kelso2-gopaf-2023-12-22_10:11:59/'
 k_reals          = 200
 batch_size       = 64
 keep_prob        = 0.8
-num_references   = 200
+num_references   = 20
 topk_predictions = 30
 augment_neighbours         = True
 tree_train_fraction        = 0.5
@@ -63,7 +63,6 @@ def choose_ccs_to_explain(labels: np.ndarray, ccs_data: pl.DataFrame) -> int:
 
 def explain_label(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction):
     # Tree fitting
-
     tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
 
     # @todo add appropriate args
@@ -90,6 +89,36 @@ def explain_label(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fracti
     importances = feature_importances[top_important_features]
 
     return top_important_features, importances, accuracy, f1_score
+
+def explain_all_labels(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction):
+    # Tree fitting
+    tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
+
+    # @todo add appropriate args
+    tree_classifier = DecisionTreeClassifier()
+
+    train_split = int(tree_train_fraction * len(labels))
+
+    tree_inputs_train = tree_inputs[:train_split]
+    tree_inputs_eval  = tree_inputs[train_split:]
+    labels_train      = labels[:train_split]
+    labels_eval       = labels[train_split:]
+
+    tree_classifier.fit(tree_inputs_train, labels_train)
+    outputs = tree_classifier.predict(tree_inputs_eval)
+    # @todo
+    accuracy = metrics.accuracy_score(labels_eval.flatten(), outputs.flatten())
+    f1_score = metrics.f1_score(labels_eval, outputs, average='micro')
+
+    # Extract explanation
+
+    feature_importances = tree_classifier.feature_importances_
+    top_important_features = np.argpartition(- np.abs(feature_importances), range(num_top_important_features))
+    top_important_features = top_important_features[:num_top_important_features]
+    importances = feature_importances[top_important_features]
+
+    # return top_important_features, importances, accuracy, f1_score
+    return accuracy, f1_score
 
 
 # Load base data and model
@@ -148,7 +177,7 @@ for reference in tqdm(range(num_references), leave=False):
     # augment the neighbours with some synthetic points
 
     if augment_neighbours:
-        displacements, new_counts = gen.independent_perturbation(neigh_icd, neigh_counts, synthetic_multiply_factor, keep_prob)
+        displacements, new_counts = gen.ontological_perturbation(neigh_icd, neigh_counts, synthetic_multiply_factor, keep_prob)
 
         neigh_counts = new_counts
         new_neigh_icd       = []
@@ -175,17 +204,16 @@ for reference in tqdm(range(num_references), leave=False):
     )
     output = model(**batch.unpack())
     output = output[0][-1]
-    labels = output.topk(topk_predictions).indices.cpu().numpy().astype(np.uint32)
+    labels = output.topk(topk_predictions).indices
 
     # @debug
     # ccs_to_explain = choose_ccs_to_explain(labels, ccs_data)
     # @debug
     id_to_explain = random.randrange(0, len(labels))
-    ccs_to_explain = labels[id_to_explain]
 
     # Black Box Predictions
 
-    labels = np.empty((len(neigh_icd), ), dtype=np.bool_)
+    neigh_labels = np.empty((len(labels), len(neigh_icd), ), dtype=np.bool_)
     cursor = 0
     while cursor < len(neigh_icd):
         new_cursor = min(cursor+batch_size, len(neigh_icd))
@@ -196,18 +224,19 @@ for reference in tqdm(range(num_references), leave=False):
             torch.device('cuda')
         )
         outputs = model(**batch.unpack())
-        if any([len(x) == 0 for x in outputs]):
-            breakpoint()
+
         outputs = [x[-1] for x in outputs]
         outputs = torch.stack(outputs)
         batch_labels = outputs.topk(topk_predictions, dim=-1).indices
-        batch_labels = torch.any(batch_labels == ccs_to_explain, dim=-1)
+        batch_labels = (batch_labels == labels[:,None,None]).any(-1)
         batch_labels = batch_labels.cpu().numpy()
 
-        labels[cursor:new_cursor] = batch_labels
+        neigh_labels[:, cursor:new_cursor] = batch_labels
         cursor = new_cursor
+    neigh_labels = neigh_labels.transpose()
 
-    top_important_features, importances, accuracy, f1_score = explain_label(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction)
+    # top_important_features, importances, accuracy, f1_score = explain_label(neigh_ccs, neigh_counts, neigh_labels[:, id_to_explain], max_ccs_id, tree_train_fraction)
+    accuracy, f1_score = explain_all_labels(neigh_ccs, neigh_counts, neigh_labels, max_ccs_id, tree_train_fraction)
     # @debug
     # print(f'accuracy is {accuracy*100:.2f}%')
 
@@ -217,8 +246,8 @@ for reference in tqdm(range(num_references), leave=False):
 
     # Present the result to the user
 
-    df = pl.DataFrame({'ccs_id':top_important_features.astype(np.uint32), 'importance':importances})
-    df = df.join(ccs_data, how='left', on='ccs_id')
+    # df = pl.DataFrame({'ccs_id':top_important_features.astype(np.uint32), 'importance':importances})
+    # df = df.join(ccs_data, how='left', on='ccs_id')
 
     # @debug
     # for it, row in enumerate(df.iter_rows()):
