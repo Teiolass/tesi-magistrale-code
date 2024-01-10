@@ -57,6 +57,7 @@ class Kelso_Model(nn.Module):
         batch:     torch.Tensor,
         positions: torch.LongTensor,
         lengths:   torch.LongTensor,
+        return_attention: bool = False,
     ) -> list[torch.Tensor]:
         # batch, position size is (bsz, b_n)  
         if batch.shape != positions.shape:
@@ -101,12 +102,22 @@ class Kelso_Model(nn.Module):
 
         # PHASE 3: transformer
 
+        all_attentions = []
+
         batch = embeddings
         for layer in self.decoder_layers:
-            batch = layer(batch, positions, mask) 
+            batch, attention = layer(batch, positions, mask) 
+            all_attentions.append(attention)
+
         batch = F.dropout(batch, p=self.config.dropout, training=self.training)
 
-        return batch
+        if return_attention:
+            # this is of shape (n_layers, bsz, num_heads, b_n, b_n)
+            all_attentions = torch.stack(all_attentions)
+            # this is of shape (bsz, n_layers, num_heads, b_n, b_n)
+            return batch, all_attentions.transpose(0, 1)
+        else:
+            return batch
 
 
 class Kelso_Filler(nn.Module):
@@ -143,9 +154,13 @@ class Kelso_Predictor(nn.Module):
         batch:     torch.Tensor,
         positions: torch.LongTensor,
         lengths:   torch.LongTensor,
+        return_attention: bool = False,
     ) -> list[torch.Tensor]:
         bsz = batch.shape[0]
-        batch = self.model(batch, positions, lengths)
+        batch = self.model(batch, positions, lengths, return_attention)
+
+        if return_attention:
+            batch, attention = batch
 
         # this is of shape (bsz, b_m, hidden)
         batch_pooled = self.pooling(batch, positions, lengths)
@@ -155,7 +170,10 @@ class Kelso_Predictor(nn.Module):
         for it in range(bsz):
             t = output[it][:positions[it].max() + 1]
             result.append(t)
-        return result
+        if return_attention:
+            return result, attention
+        else:
+            return result
 
 # See this [article](http://arxiv.org/abs/2104.09864)
 class Rotary_Embedding:
@@ -203,7 +221,7 @@ class Kelso_Decoder_Layer(nn.Module):
     
     def forward(self, batch: torch.Tensor, positions: torch.LongTensor, mask: torch.Tensor):
         residual = batch
-        batch = self.attention(batch, mask, positions)
+        batch, attn = self.attention(batch, mask, positions)
         batch = F.dropout(batch, p=self.dropout, training=self.training)
         batch = batch + residual
         residual = batch
@@ -212,7 +230,7 @@ class Kelso_Decoder_Layer(nn.Module):
         batch = F.dropout(batch, p=self.dropout, training=self.training)
         batch = batch + residual
         batch = self.normalization_post(batch)
-        return batch
+        return batch, attn
 
 
 class Kelso_Attention(nn.Module):
@@ -252,10 +270,10 @@ class Kelso_Attention(nn.Module):
             if positions is not None:
                 raise ValueError('positions provided but no rotary embedding is set')
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        attn_weights = attn_weights + mask
+        attn_logits = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_logits = attn_logits + mask
 
-        attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = F.softmax(attn_logits, dim=-1)
         attn_output  = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, b_n, self.head_dim):
@@ -269,7 +287,7 @@ class Kelso_Attention(nn.Module):
         attn_output = F.dropout(attn_output, p=self.dropout, training=self.training)
         attn_output = self.o_proj(attn_output)
 
-        return attn_output
+        return attn_output, attn_weights
 
 class Kelso_MLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int):

@@ -113,12 +113,9 @@ def explain_all_labels(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_f
     # Extract explanation
 
     feature_importances = tree_classifier.feature_importances_
-    top_important_features = np.argpartition(- np.abs(feature_importances), range(num_top_important_features))
-    top_important_features = top_important_features[:num_top_important_features]
-    importances = feature_importances[top_important_features]
 
     # return top_important_features, importances, accuracy, f1_score
-    return accuracy, f1_score
+    return feature_importances, accuracy, f1_score
 
 
 # Load base data and model
@@ -152,6 +149,13 @@ counts_eval    = list(diagnoses_eval['count'   ].to_numpy())
 
 total_accuracy = 0.0
 total_f1_score = 0.0
+
+importance_ds = {
+    'tree_importance': [],
+    'attention_max': [],
+    'attention_min': [],
+    'attention_avg': [],
+}
 
 for reference in tqdm(range(num_references), leave=False):
     # Find closest neighbours in the real data
@@ -202,14 +206,35 @@ for reference in tqdm(range(num_references), leave=False):
         [positions_eval[reference]],
         torch.device('cuda'),
     )
-    output = model(**batch.unpack())
+    output, attention = model(**batch.unpack(), return_attention=True)
     output = output[0][-1]
     labels = output.topk(topk_predictions).indices
+
+    attention = attention.squeeze(0)
+    attention_flat = attention.reshape((-1, attention.shape[-1]))
+    attention_max_seq = attention_flat.max(0).values
+    attention_avg_seq = attention_flat.mean(0)
+    attention_flat_filtered = attention_flat
+    attention_flat_filtered[attention_flat_filtered < 1e-6] = 2.00
+    attention_min_seq = attention_flat_filtered.min(0).values
+    attention_max = np.zeros((max_ccs_id,))
+    attention_min = np.ones((max_ccs_id,))
+    attention_avg = np.zeros((max_ccs_id,))
+    attention_cnt = np.zeros((max_ccs_id,))
+    if attention_flat.shape[-1] != len(ccs_codes_eval[reference]):
+        raise ValueError('Mismatch in sizes')
+    for it in range(len(ccs_codes_eval[reference])):
+        c = ccs_codes_eval[reference][it]
+        attention_max[c] = max(attention_max[c], float(attention_max_seq[it]))
+        attention_min[c] = min(attention_min[c], float(attention_min_seq[it]))
+        attention_avg[c] = attention_avg[c] + float(attention_avg_seq[it])
+        attention_cnt[c] += 1
+    attention_avg = attention_avg / np.maximum(attention_cnt, 1)
 
     # @debug
     # ccs_to_explain = choose_ccs_to_explain(labels, ccs_data)
     # @debug
-    id_to_explain = random.randrange(0, len(labels))
+    # id_to_explain = random.randrange(0, len(labels))
 
     # Black Box Predictions
 
@@ -236,9 +261,14 @@ for reference in tqdm(range(num_references), leave=False):
     neigh_labels = neigh_labels.transpose()
 
     # top_important_features, importances, accuracy, f1_score = explain_label(neigh_ccs, neigh_counts, neigh_labels[:, id_to_explain], max_ccs_id, tree_train_fraction)
-    accuracy, f1_score = explain_all_labels(neigh_ccs, neigh_counts, neigh_labels, max_ccs_id, tree_train_fraction)
+    importances, accuracy, f1_score = explain_all_labels(neigh_ccs, neigh_counts, neigh_labels, max_ccs_id, tree_train_fraction)
     # @debug
     # print(f'accuracy is {accuracy*100:.2f}%')
+
+    importance_ds['tree_importance'].append(importances)
+    importance_ds['attention_max'].append(attention_max)
+    importance_ds['attention_min'].append(attention_min)
+    importance_ds['attention_avg'].append(attention_avg)
 
     # @debug
     total_accuracy += accuracy
@@ -264,3 +294,12 @@ accuracy = total_accuracy / num_references
 f1_score = total_f1_score / num_references
 print(f'avg accuracy: {accuracy*100:.4f}%')
 print(f'avg f1_score: {f1_score*100:.4f}%')
+
+importance_ds['tree_importance'] = np.concatenate(importance_ds['tree_importance'])
+importance_ds['attention_max']   = np.concatenate(importance_ds['attention_max'])
+importance_ds['attention_min']   = np.concatenate(importance_ds['attention_min'])
+importance_ds['attention_avg']   = np.concatenate(importance_ds['attention_avg'])
+
+breakpoint()
+
+
