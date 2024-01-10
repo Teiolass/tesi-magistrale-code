@@ -1,3 +1,3 @@
 # Tesi
 
-- `kelso-ii` is a flat transformer
+[LINK](docs/main.pdf) for the pdf

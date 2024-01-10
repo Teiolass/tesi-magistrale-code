@@ -190,8 +190,8 @@ $ "FFN"(y_i) = W_1 sigma(W_2 y_1 + b) $
 where $sigma$ is an activation function, usually a ReLU, and $W_1, W_2, b$ are parameters of
 suitable size.
 
-As in most deep learning models, skip connections and layer normalizations are also added. #note("Di
-più?")
+As in most deep learning models, skip connections and layer normalizations are also added.
+#note("Di più?")
 
 In the recurrent models the order of the tokens was given to the model implicitely, because the
 their embedding were fed in the right order. The same does not apply in transformer models: a
@@ -210,6 +210,33 @@ $ p_i = mat(sin((omega i) / 2^0); cos((omega i) / 2^0); sin((omega i) / 2^1); co
 This kind of vectors has showed to perform well. A possible line of reasoning for its justification
 is that vectors of sines and cosines can be translated in time with just linear transformations,
 which are easily performed within the model.
+
+We observe that the length of the path between each output vector and each input embedding is not
+dependent by the distance between the corresponding token, but they interact directly in the
+attention computation. This completely solves the biggest issue of the recurrent models.
+
+Another big advantage of transformer based models respect to recurrent ones is that all the
+computations can be carried out in parallel, instead of having to find the hidden state of the
+previous iteration in order to be able to start the next one. This allows a better usage of GPUs and
+therefore smaller training times.
+
+Moreover, in a training phase, all the outputs can be computed in one single sweep. This should be
+done carefully though, because the prediction of the $i$-th cannot be performed by having as input
+the $i+1$-th token, or even the $i$-th token itself. This can be done by tweaking the attention
+matrices, imposing that the attention for the $i$-th query and the $j$-th key are zero whenever $i
+<= j$. The easiest way to accomplish this is by setting the corresponding importances to minus
+infinity, which in turn will translate to zero through the SoftMax function. This correspond to add
+to the importance matrices some upper triangular matrices.
+
+Attention masks can be useful for another purpose as well. Until now we considered a single pair
+input/output going through the model at each step of the training process. However usually deep
+learning models are trained using minibatches of data for each step. This can be accomplished by
+running multiple "single pass" steps, one for each element of the minibatch, and accumulating the
+gradient. It may be more perfomant to deal with the minibatch in a single pass. This can be done by
+concatenating all the data for the minibatch in a new dimension of the matrices, and the model
+doesn't change much to accomodate this modification. However in general the sequence length will not
+be constant through the minibatch. Thus all the sequences are padded to the max length within the
+minibatch, and the attention mask is tweaked to avoid that any output depends on a padding token.
 
 == Explainability 
 
