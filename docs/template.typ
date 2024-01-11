@@ -95,6 +95,8 @@
     ]
   })
 
+  show raw: set text(size: 8pt)
+
   show figure: it => block(width: 100%)[#align(center)[
     #it.body
     #set align(left)

@@ -485,16 +485,6 @@ fn compute_p2p(p1: [][]u32, p2: [][]u32, _table_c2c: Table_c2c, allocator: std.m
         }
     }
 
-    // @debug
-    // std.debug.print("\ntable {}x{}\n", .{ p1.len, p2.len });
-    // for (0..p2.len) |jt| {
-    //     for (0..p1.len) |it| {
-    //         std.debug.print("{d:.1}  ", .{table[jt * w + it]});
-    //     }
-    //     std.debug.print("\n", .{});
-    // }
-    // std.debug.print("\n", .{});
-
     return table[table.len - 1];
 }
 

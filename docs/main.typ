@@ -12,6 +12,7 @@
   bibliography-file: "refs.bib",
 )
 
+
 #let ds = math.cal("D")
 #let R  = math.bb("R")
 
@@ -45,6 +46,8 @@ to translate. In the second part the answer is generated in an autoregressive ma
 a special `<start>` token, the model generates the next token. The new token is then concatenated to
 the previous ones, and is given to the model, which generates a next token. This process continues
 until a special `<end>` token is generated, or the generated sequence length exceeds a fixed limit.
+
+=== Recurrent Models and Attention
 
 A recurrent model is built in such a way that it can take in input a hidden memory vector $h$, and a
 token $t$, and then outputs $h'$, an updated version of $h$. The new hidden vector is then fed to
@@ -147,6 +150,8 @@ before: it takes as an input the previous hidden state, the embedding of a token
 a contex vector. Each of the subsequent layers takes in input the previous hidden state for that
 layer, the hidden state of the previous layer, and sometimes the context vector.
 
+=== Transformers
+
 The next iteration on these design led to the current State of the Art models like GPT-3.5 or Llama.
 The idea is to get rid entirely of the recurrent part, focusing only on the attention. The heart of
 these models is the transformer. It is a layer that takes as an input a set of $d$-dimensional
@@ -188,7 +193,7 @@ usually go through a Feed Forward Network (FFN) between a transformer layer and 
 networks are usually very simple, often in the form
 $ "FFN"(y_i) = W_1 sigma(W_2 y_1 + b) $
 where $sigma$ is an activation function, usually a ReLU, and $W_1, W_2, b$ are parameters of
-suitable size.
+suitable size. This component is also called Multi-Layer Perceptron (MLP).
 
 As in most deep learning models, skip connections and layer normalizations are also added.
 #note("Di più?")
@@ -238,7 +243,63 @@ doesn't change much to accomodate this modification. However in general the sequ
 be constant through the minibatch. Thus all the sequences are padded to the max length within the
 minibatch, and the attention mask is tweaked to avoid that any output depends on a padding token.
 
-== Explainability 
+All of this tweaks allows the model to grow in size while still being trainable. In the last year in
+fact there have been proposed several of such models, varying in size between a few billions
+parameters to hundred of billions of parameters. These are called Large Language Models, or LLMs.
+Examples are the GPT family developed by OpenAI, and the Llama family, developed by Meta.
+
+=== The Llama-2 Models
+
+The Llama-2 are a family of LLMs sharing the same underlying architecture and available in different
+sizes: 7B, 13B, 34B and 70B, where the number counts the number of trainable parameters of the
+model. The architecture is the same transformer-based decoder described in the previous section,
+with the following modifications.
+1. Normalization Layer... #note("Questo qui non c'è in Kelso")
+
+2. The positional encoding have been replaced by Rotary Position Embeddings. The idea is to add
+  positional information at each layer of the model, modifying the key and query vectors by a
+  suitable function dependent by time. Let this modification be represented by the functions 
+  $f_k(y_n, n)$ and $f_q(y_n, n)$, where $y_n$ is the $n$-th vector of the previous layeror the
+  token embedding  mutliplied by the matrix $W_k$ or $W_q$. Let's assume that the hidden dimension
+  to be an even number $d$, which is reasonable since for performance reasons typical values of
+  dimensions are large powers of two or some of their multiples. Then a good choice could be
+  $ f_({q, k})(y_n, n) = R_(Theta, n) y_m $
+  where $R_(Theta, n)$ is a matrix in the following form:
+  $ R_(Theta, n) = mat(
+      R(n theta_1), 0, ..., 0;
+      0, R(n theta_2), ..., 0;
+      dots.v, dots.v, dots.down, dots.v;
+      0,0, ..., R(n theta_(d slash 2));
+    ),\ 
+  R(theta) = mat(cos theta, -sin theta; sin theta, cos theta),
+  $
+  and $Theta = { theta_1, ..., theta_(d slash 2) }$ with $theta_i = 10000^(-2(i-1) slash d)$.
+
+  This choice has a nice property. Let $x_n$ and $x_m$ be the outputs of the previous layer. Then
+  the attention importance relative to the $n$-th query and $m$-th key using the Rotary Embedding
+  can be written as
+  $ I_(n,m) &= (R_(Theta, n)W_q x_n)^top (R_(Theta, m)W_k x_m) \ 
+            &=  x_n^top W_q^top R_(Theta, m-n) W_k x_m.
+  $ <rotary-importance>
+  The matrix $R_(Theta, m-n)$ is an orthogonal matrix, which helps the flowing of the gradient
+  during training. Moreover from equation @rotary-importance we can see that this is a kind of
+  relative encoding, which, in contrast with the absolute encoding, add informations only about the
+  distance of two tokens, and not their position in the whole sentence. For many tasks this is a
+  desirable property. One final remark is that the matrices $R_(Theta, n)$ are very sparse, and thus
+  the computation of the products can be performed in a $cal("O")(d)$ complexity.
+
+3. The MLP layers has been replaced with a Swish Gated Linear Unit (SwiGLU). The function $"Swish"$
+  is defined as 
+  $ "Swish"(x) = x sigma(x) $
+  where $sigma$ is the sigmoid function. Given a hidden dimension of the model $d_h$ and a new
+  dimension $d_"MLP"$ for the MLP, we define the Gated Linear Unit as be parametrized by the
+  $W_"gate"$, $W_"up"$ and $W_"down"$, of size $d_h times d_"MLP"$ for the first two, and $d_"MLP"
+  times d_h$ for the last one. Let's denote the component-wise multiplication of two vectors with
+  the symbol $dot.circle$. Then the layer is defined as
+  $ "MLP"(x) = W_"down" ("Swish"(W_"gate" x) dot.circle W_"up" x) $
+  This approach has been proven to have a better behaviour than a plain MLP layer.
+
+  == Explainability 
 
 - Carrellata di roba
 - DrXAI
@@ -281,8 +342,91 @@ The objective of a training process is to find an optimal parameter $hat(theta)$
 function $h(dot.c, hat(theta))$ is the best approximation of the distribution $mu_"next"$. Since the
 latter is never known, we will use the empirical distribution found in the dataset #ds as its proxy.
 
-
 == Ontology
+
+#let codes_in = $cal("C")_"in"$
+#let codes = $cal("C")$
+#let tree = $cal("T")$ 
+#let patients = $cal("P")$
+#let visits = $cal("v")$
+
+In many fields, and in particular the medical one, which is of our interest, some categorical data
+is not just made of indistinguishable labels, but rather by leaf-nodes of a tree. This can be
+formally described as follows. Let $#codes_in$ be a set of "inner nodes", and let $#codes' = #codes
+union #codes_in$. Let $#tree$ be a tree with nodes $#codes'$ and whose leaves are all and only the
+codes $#codes$. This tree is called _ontology_ and gives some informations over the codes in $#codes$
+that appeares in the dataset. We will assume that codes that are closer with respect to the distance
+on the graph $#tree$ to be more similar than codes that are less close.
+
+As done in @panigutti-xai we proceed to describe a distance on the possible patients $#patients$. To
+do that, we will use a distance over the codes $#codes$ and the visits $#visits$.
+
+We start describing a code-to-code distance. It is the Wu-Palmer similarity score, which is one of
+the most commonly used for the ICD ontology. Let $c_1$ and $c_2$ be two codes in $#codes$. Let $L$
+be their lowest common ancestor on the tree $#tree$, and let $R$ be the root of $#tree$. Let $d(c_1',
+c_2')$ be the distance between codes in $#codes'$ which measures the smallest number of steps needed
+to reach $c_2'$ starting from $c_1'$ and moving along the edges of the graph $#tree$. the Wu-Palmer
+similarity score is then defined as
+$ "WuP"(c_1, c_2) = (2 d(L,R)) / (d(c_1,L) + d(c_2, L) + 2d(L,R)) $
+
+We observe that $0 <= "WuP"(c_1, c_2) <= 1$ for each pair of codes, and the minimum value $0$ is
+reached when $L$ is the root of the tree, while the maximum value $1$ is reached when $c_1 = c_2 =
+L$.
+
+We can then define a visit-to-visit distance. The approach of @panigutti-xai is to use an edit
+distance weighted through the Wu-Palmer similarity. However would need to choose an order between
+the codes of each visit, while the codes do not have a natural order. For this reason we will follow
+a different approach. Let $V_A = {c^A_1, ..., c^A_a}$ and $V_B = {c^B_1,..., c^B_b}$ be two visits
+composed by $a$ and $b$ codes respectively. For each code in $V_A$ we choose the best similar code
+in $V_B$. We them sum all of the distances between the best pairs to get an asymetric distance:
+$ d^#visits _"asym" (V_A, V_B) = sum_(i=1)^a min_(j=1...b) "WuP"(v^A_i, v^B_j). $
+We can symmetrize the above expression taking the maximum of the two permutations:
+$ d^#visits  (V_A, V_B) = max(d^#visits _"asym" (V_A, V_B), d^#visits _"asym" (V_B, V_A)). $
+
+Assuming to have precomputed a table with all the distance pairs $"Wup"(c_1, c_2)$, the computation
+of $d^#visits (V_A, V_B)$ has a complexity of $cal("O")(n^2)$, where $n$ is an upper limit on the
+size of the visits.
+
+Finally we are ready to describe a patient-to-patient distance $d^#patients$. We do that through
+the Dynamic Time Warp (DTW) Algorithm. It gives a measure of similarity between two time series that can
+differ in speed. The idea is to find associations between two elements of each series, in our
+context they are visits of two patients, subject to the following constraints:
+- Every element of the first sequence must be associated to an element of the first one;
+- The first and the last elements of each sequence must be associated between them, but they not to
+  be their only association.
+- The associations must be monotonical: Let the $i$-th element of the first sequence is associated
+  to the $j$-th element of the second one, and a similar things happens for the $i'$-th element in
+  the first sequence and the $j'$-th element of the second one. Then $i<i'$ implies $j<= j'$.
+We can give a cost to each way of associating two series: it is the sum of the visit-to-visit
+distances between each associated pair. The DTW similarity is then defined as the minimum cost
+between all the associations that respect the previous conditions.
+
+This optimization problem can be solved with a dynamic programming approach. Here it follows the
+algorithm in pseudocode:
+#note("Spudoratamente preso da Wikipedia")
+```
+int DTWDistance(s: array [1..n], t: array [1..m]) {
+    DTW := array [0..n, 0..m]
+    
+    for i := 0 to n
+        for j := 0 to m
+            DTW[i, j] := infinity
+    DTW[0, 0] := 0
+    
+    for i := 1 to n
+        for j := 1 to m
+            cost := d(s[i], t[j])
+            DTW[i, j] := cost + minimum(DTW[i-1, j  ],    // insertion
+                                        DTW[i  , j-1],    // deletion
+                                        DTW[i-1, j-1])    // match
+    
+    return DTW[n, m]
+}
+```
+#note("Posso spiegare più in dettaglio qui")
+
+It should be noted that the measure we have defined is not a distance in the sense of the metric
+spaces, in fact it cannot guarantee the triangular inequality.
 
 == Solution Proposal
 
