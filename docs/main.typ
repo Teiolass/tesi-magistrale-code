@@ -426,7 +426,11 @@ int DTWDistance(s: array [1..n], t: array [1..m]) {
 #note("Posso spiegare più in dettaglio qui")
 
 It should be noted that the measure we have defined is not a distance in the sense of the metric
-spaces, in fact it cannot guarantee the triangular inequality.
+spaces, in fact it cannot guarantee the triangular inequality. Moreover if the number of visit per
+patient is bounded by $m$ and the number of codes per visit is bounded by $n$, then there will be
+$m^2$ iterations within the DTW algorithm, each of those will require a computation of the
+visit-to-visit distance, which costs $cal("O")(n^2)$ iterations. Thus the total cost of the
+algorithm is $cal("O")(m^2n^2)$.
 
 == Solution Proposal
 
@@ -435,6 +439,80 @@ spaces, in fact it cannot guarantee the triangular inequality.
 = Experiments
 
 == Mimic IV
+
+Mimic IV @mimic-iv-cit is a dataset contaning medical informations resulted from the collaboration
+of the Beth Israeli Deaconess Medical Center (BIDMC) and the Massachusetts Institute of Technology
+(MIT). Data is gathered as part of the routine activities at BIDMC, and processed at MIT.
+
+The dataset contains informations about patients accessing the services at the emergency department
+or Intensive Care Units (ICUs) between 2008 and 2019. Patients that were below age 18 at ther first
+admission time were excluded. People known to require extra protection were excluded as well.
+Between the raw data sources and the final published dataset, a step of deintefication of the
+patients has been performed, removing all personal informations and translating by a random time all
+the events regarding every single patient.
+
+The dataset is divided into three separate modules: `hosp`, `icu`, and `note`.
+
+The `hosp` module stores information regarding patient transfers, billed events, medication
+prescription, medication administration, laboratory values, microbiology measurements, and provider
+orders. This is the main source of data of this project.
+
+The `icu` module contains all the information collected by the MetaVision clinical information
+system for the ICU units.
+
+The `note` module contains textual data of discharges, which gathers an in-depth summary of the
+patients history during their stays at the hospital, and a section about radiology data.
+
+Our main interest is in the `hosp` module, which contains among other things a table of admissions
+and a table of diagnoses. The admissions is a table that associates a patient id, an admission id,
+several temporal coordinates for the admissions such as the admission, registration and discharge
+times. There are also information about the patient like language, insurance, race and marital
+status. We will use only the patient and admission id, and the relative ordering given by the
+admission time. This table contains 431,231 rows, each corresponding to a unique admission. 
+
+The diagnoses table is much larger, containing 4,756,326 rows, each with a unique diagnose. A
+diagnose is composed by a patient id and admission id, which correspond to the ones given in the
+admission table, a couple icd-version and icd-code, and a numerical priority ranging 1-39 which
+ranks the importance of the codes within the same visit.
+
+ICD, the International Classification of Diseases, which is a system to classify diagnostic
+statements mantained by the World Health Organizaton (WHO). There are several versions of these
+codes, and Mimic-iv uses ICD-9 and ICD-10. The version is flagged in a specific column of the
+diagnoses table. A code may indicate signs, symptoms, abnormal findings, complaints, social
+circumstances, and external causes of injury or disease. In @icd-examples are reported some examples
+of ICD-10 codes. ICD-9 codes are very similar.
+
+#figure(
+table(
+  columns: (auto, auto),
+  [Code], [Description],
+  [A00.0], [Cholera due to Vibrio cholerae 01, biovar cholerae],
+  [E66.0], [Obesity due to excess calories],
+  [I22.0], [Subsequent myocardial infarction of anterior wall],
+  [F32.0], [Mild depressive episode],
+  [O80.0], [Spontaneous vertex delivery],
+  [S81.0], [Open wound of knee],
+  [W58],   [Bitten or struck by crocodile or alligator],
+  [Z56.3], [Stressful work schedule],
+  [Z72.0], [Tobacco use (Excl. tobacco dependence)],
+),
+caption: [Examples of ICD-10 codes with their descriptions.]
+) <icd-examples>
+
+In the diagnoses table of the Mimic-iv dataset there are 2,766,877 ICD-9 codes (58% of the total)
+and 1,989,449 codes (42% of the total). Considering codes with different versions of ICD
+categorization as different, the dataset contains 25,829 distinct codes, which means that each code
+appears on average 184 times in the database. Of course the codes are not evenly distributed among
+those present. #note("Grafico della distribuzione").
+
+The admission table contains 180,733 distinct patients. However there are 101,198 patients (56% of
+the total) who are present in a single admission. We will filter those out because to make a
+prediction that can be compared with a ground truth at least two visits are necessary. A percentage
+of 92% of patients has no more than five visits.
+
+A preprocess phase is done by deleting all the patients who have a single visit, and then a
+conversion from ICD-9 to ICD-10 is performed, such that all the models will work on a single
+ontology.
 
 == Analysis
 
