@@ -9,6 +9,7 @@ pos_base    = 10_000
 dropout     = 0.5
 device      = 'cuda'
 mlp_intermediate_size = 1024
+parametrized_head = false # @hack to have uniform kelso config
 
 [trainer]
 hole_prob         = 0.05
@@ -22,10 +23,9 @@ eval_split        = 0.15
 test_split        = 0.15
 weight_decay      = 0.05
 eval_batch_size   = 64
-ccs_as_inputs     = false
 patience          = 5000
 save_directory    = 'results/filler-%(id)-%(date)/'
-# limit_num_batches = 3
+# limit_num_batches = 5
 
 
 

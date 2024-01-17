@@ -5,7 +5,7 @@ import lib.generator as gen
 
 from kelso_model import *
 
-import torch # @todo necessary?
+import torch
 from sklearn.tree import DecisionTreeClassifier
 from sklearn import metrics
 
@@ -13,20 +13,24 @@ import random
 
 from tqdm import tqdm
 
-ontology_path  = 'data/processed/ontology.parquet'
-diagnoses_path = 'data/processed/diagnoses.parquet'
-ccs_path       = 'data/processed/ccs.parquet'
-model_path     = 'results/kelso2-gopaf-2023-12-22_10:11:59/'
+ontology_path   = 'data/processed/ontology.parquet'
+diagnoses_path  = 'data/processed/diagnoses.parquet'
+generation_path = 'data/processed/generation.parquet'
+ccs_path        = 'data/processed/ccs.parquet'
+model_path      = 'results/kelso2-gopaf-2023-12-22_10:11:59/'
+filler_path     = ''
 
 k_reals          = 200
 batch_size       = 64
 keep_prob        = 0.8
 num_references   = 20
 topk_predictions = 30
-augment_neighbours         = True
+augment_neighbours         = False
+generative_perturbation    = True
 tree_train_fraction        = 0.5
 num_top_important_features = 10
-synthetic_multiply_factor  = 10
+synthetic_multiply_factor  = 4
+generative_multiply_factor = 4
 
 def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
     codes = pl.DataFrame({'icd9_id':ids})
@@ -157,6 +161,16 @@ importance_ds = {
     'attention_avg': [],
 }
 
+
+if generative_perturbation:
+    filler, hole_prob, hole_token_id = load_kelso_for_generation(filler_path)
+    conv_data = pl.read_parquet(generation_path).sort('out_id')
+    zero_row  = pl.DataFrame({'icd9_id':0, 'out_id':0, 'ccs_id':0}, schema=conv_data.schema)
+    conv_data = pl.concat([zero_row, conv_data])
+
+    out_to_icd = conv_data['icd9_id'].to_numpy()
+    out_to_ccs = conv_data['ccs_id' ].to_numpy()
+
 for reference in tqdm(range(num_references), leave=False):
     # Find closest neighbours in the real data
     distance_list = gen.compute_patients_distances (
@@ -197,6 +211,44 @@ for reference in tqdm(range(num_references), leave=False):
         neigh_icd       = new_neigh_icd
         neigh_ccs       = new_neigh_ccs
         neigh_positions = new_neigh_positions
+
+    if generative_perturbation:
+        new_neigh_icd       = []
+        new_neigh_ccs       = []
+        new_neigh_counts    = []
+        new_neigh_positions = []
+        cursor = 0
+        while cursor < len(neigh_icd):
+            new_cursor = min(cursor + batch_size, len(neigh_icd))
+
+            batch = prepare_batch_for_generation (
+                neigh_icd      [cursor:new_cursor],
+                neigh_counts   [cursor:new_cursor],
+                neigh_positions[cursor:new_cursor],
+                hole_prob,
+                hole_token_id,
+                torch.device('cuda')
+            )
+
+            gen_output = filler(**batch.unpack()) # (bsz, b_n, n_out)
+            old_shape = gen_output.shape
+            gen_output = gen_output.reshape((-1, gen_output.shape[-1]))
+            gen_output = torch.softmax(gen_output, dim=-1)
+
+            for _ in range(generative_multiply_factor):
+                new_codes = torch.multinomial(gen_output, 1)
+                new_codes = new_codes.reshape(old_shape[:-1])
+                new_codes = new_codes.cpu().numpy()
+
+                new_icd = list(out_to_icd[new_codes])
+                new_ccs = list(out_to_ccs[new_codes])
+
+                new_neigh_icd       += new_icd
+                new_neigh_ccs       += new_ccs
+                new_neigh_counts    += neigh_counts[cursor:new_cursor]
+                new_neigh_positions += neigh_positions[cursor:new_cursor]
+
+            cursor = new_cursor
 
     # Choose result to explain
 

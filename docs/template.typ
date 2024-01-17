@@ -1,4 +1,5 @@
 // This function gets your whole document as its `body` and formats
+// te
 // it as an article in the style of the IEEE.
 //
 
@@ -177,6 +178,11 @@
 
 #let note(body) = {
   set text(green)
+  [#body]
+}
+
+#let comment(body) = {
+  set text(orange)
   [#body]
 }
 

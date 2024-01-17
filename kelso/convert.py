@@ -13,12 +13,14 @@ ccs_single_file = 'ccs_single_dx_tool_2015.csv'
 icd_conv_file   = 'icd10cmtoicd9gem.csv'
 ontology_file   = 'data/ICD9CM.csv'
 
-output_diagnoses = 'diagnoses.parquet'
-output_ccs       = 'ccs.parquet'
-output_icd       = 'icd.parquet'
-output_ontology  = 'ontology.parquet'
+output_diagnoses  = 'diagnoses.parquet'
+output_ccs        = 'ccs.parquet'
+output_icd        = 'icd.parquet'
+output_ontology   = 'ontology.parquet'
+output_generation = 'generation.parquet'
 
 min_icd_occurences = 20
+num_output_codes = 500
 
 train_fraction = 0.7
 eval_fraction  = 0.15
@@ -116,6 +118,23 @@ admissions = admissions.select (
 )
 diagnoses = diagnoses.join(admissions, on='hadm_id', how='left').drop('hadm_id')
 
+
+# this is for the generation
+
+top_codes = diagnoses['icd9_id'].value_counts().sort('counts').head(num_output_codes)
+top_codes = top_codes.filter(pl.col('icd9_id') != 0)
+top_codes = top_codes.select(
+    pl.col('icd9_id'),
+    out_id = pl.arange(1, top_codes.shape[0]+1),
+)
+diagnoses = diagnoses.join(top_codes, on='icd9_id', how='left')
+diagnoses = diagnoses.with_columns(pl.col('out_id').fill_null(0))
+generation_conversion = top_codes.join(icd9_codes, on='icd9_id')
+generation_conversion = generation_conversion.join(ccs_conv, left_on='icd_code', right_on='icd9', how='left')
+generation_conversion = generation_conversion.join(ccs_codes, on='ccs', how='left')
+generation_conversion = generation_conversion[['icd9_id', 'out_id', 'ccs_id']]
+
+
 # prepare for use
 diagnoses_a = (
     diagnoses
@@ -124,7 +143,7 @@ diagnoses_a = (
     )
     .group_by('subject_id')
     .agg(
-        col(['ccs_id', 'icd9_id', 'position']).sort_by('admittime'),
+        col(['ccs_id', 'icd9_id', 'position', 'out_id']).sort_by('admittime'),
     )
 )
 diagnoses_b = (
@@ -224,20 +243,23 @@ ontology = ontology.join(dictionary, how='left', on='parent')
 
 # @@ Save
 
-diagnoses_path = os.path.join(output_prefix, output_diagnoses)
-ccs_path       = os.path.join(output_prefix, output_ccs)
-icd9_path      = os.path.join(output_prefix, output_icd)
-ontology_path  = os.path.join(output_prefix, output_ontology)
+diagnoses_path  = os.path.join(output_prefix, output_diagnoses)
+ccs_path        = os.path.join(output_prefix, output_ccs)
+icd9_path       = os.path.join(output_prefix, output_icd)
+ontology_path   = os.path.join(output_prefix, output_ontology)
+generation_path = os.path.join(output_prefix, output_generation)
 
 print('')
-print(f'diagnoses path is: {diagnoses_path}')
-print(f'ccs path is:       {ccs_path}')
-print(f'icd9 path is:      {icd9_path}')
-print(f'ontology path is:  {ontology_path}')
+print(f'diagnoses path is:  {diagnoses_path}')
+print(f'ccs path is:        {ccs_path}')
+print(f'icd9 path is:       {icd9_path}')
+print(f'ontology path is:   {ontology_path}')
+print(f'generative path is: {generation_path}')
 print('')
 
 diagnoses .write_parquet(diagnoses_path)
 ccs_codes .write_parquet(ccs_path)
 icd9_codes.write_parquet(icd9_path)
 ontology  .write_parquet(ontology_path)
+generation_conversion.write_parquet(generation_path)
 

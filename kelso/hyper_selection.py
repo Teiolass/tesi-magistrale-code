@@ -187,7 +187,7 @@ class Search_Logger:
         recalls    = sorted(self.results[0].recalls)
         log_keys   = ['loss'] + ['recall@{}'.format(k) for k in recalls]
 
-        header = ', '.join(['path'] + param_keys + log_keys)
+        header = ','.join(['path'] + param_keys + log_keys)
         lines = [header]
         for path, param, res in zip(self.paths, self.params, self.results):
             data  = ['"{}"'.format(path)] 

@@ -32,6 +32,7 @@ class Kelso_Config:
     dropout:     float
     device:      str | torch.device
     mlp_intermediate_size: int
+    parametrized_head: bool
 
 
 class Kelso_Model(nn.Module):
@@ -304,8 +305,10 @@ class Kelso_MLP(nn.Module):
 class Kelso_Pooling(nn.Module):
     def __init__(self, config: Kelso_Config):
         super().__init__()
-        self.scorer_attn = Kelso_Attention(config)
-        self.scorer_gmlp = Kelso_MLP(config.hidden_size, config.mlp_intermediate_size)
+        self.parametrized_head = config.parametrized_head
+        if config.parametrized_head:
+            self.scorer_attn = Kelso_Attention(config)
+            self.scorer_gmlp = Kelso_MLP(config.hidden_size, config.mlp_intermediate_size)
 
     def forward(self, batch: torch.Tensor, pos: torch.LongTensor, lengths: torch.LongTensor) -> torch.Tensor:
         bsz, b_n, h = batch.shape
@@ -325,8 +328,12 @@ class Kelso_Pooling(nn.Module):
         pad_mask = pad_mask[:, None, None, :]
         mask = pad_mask + decoder_mask
 
-        pooling_score = self.scorer_attn(batch, mask)
-        pooling_score = self.scorer_gmlp(batch)
+        if self.parametrized_head:
+            pooling_score = self.scorer_attn(batch, mask)
+            pooling_score = self.scorer_gmlp(batch)
+        else:
+            with torch.device(batch.device):
+                pooling_score = torch.ones((bsz, b_n, h))
 
         # visit-wise sums helpers
         ids = pos.clamp(0, None) + torch.arange(bsz, device=pos.device).unsqueeze(1) * b_m
@@ -393,9 +400,55 @@ def prepare_batch_for_inference (
         lenghts   = b_lengths,
     )
 
+@dataclass
+class Generation_Batch:
+    codes:     torch.Tensor
+    positions: torch.Tensor
+    lenghts:   torch.Tensor
+
+    def unpack(self) -> dict:
+        return {
+            'batch':     self.codes,
+            'positions': self.positions,
+            'lengths':   self.lenghts,
+        }
+
+def prepare_batch_for_generation (
+    codes:     list[np.ndarray],
+    counts:    list[np.ndarray],
+    positions: list[np.ndarray],
+    hole_prob: float,
+    hole_token_id: int,
+    device:    torch.device,
+) -> Generation_Batch:
+    codes     = [x.astype(np.int64) for x in codes]
+    counts    = [x.astype(np.int64) for x in counts]
+    positions = [x.astype(np.int64) for x in positions]
+
+    lengths = [len(x) for x in codes]
+    b_n = max(lengths)
+
+    b_codes     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in codes])
+    b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in positions])
+
+    mask = np.random.rand(*b_input.shape) < hole_prob
+    b_input[mask] = hole_token_id
+
+    with torch.device(device):
+        b_codes     = torch.from_numpy(b_codes)    .to(device)
+        b_positions = torch.from_numpy(b_positions).to(device)
+        b_lengths   = torch.LongTensor(lengths)    .to(device)
+
+    return Inference_Batch (
+        codes     = b_codes,
+        positions = b_positions,
+        lenghts   = b_lengths,
+    )
 
 
-def load_kelso_for_inference(path: str) -> Kelso_Model:
+
+
+def load_kelso_for_inference(path: str) -> Kelso_Predictor:
     config_path = os.path.join(path, CFG_FILE_NAME)
     model_path  = os.path.join(path, MODEL_FILE_NAME)
 
@@ -408,4 +461,21 @@ def load_kelso_for_inference(path: str) -> Kelso_Model:
     state_dict = torch.load(model_path)
     model.load_state_dict(state_dict)
     return model
+
+def load_kelso_for_generation(path: str) -> Kelso_Filler:
+    config_path = os.path.join(path, CFG_FILE_NAME)
+    model_path  = os.path.join(path, MODEL_FILE_NAME)
+
+    with open(config_path, 'r') as f:
+        txt = f.read()
+    config = tomlkit.parse(txt)['model']
+    config = Kelso_Config(**config)
+
+    model = Kelso_Filler(config) 
+    state_dict = torch.load(model_path)
+    model.load_state_dict(state_dict)
+
+    hole_prob     = config['trainer']['hole_prob']
+    hole_token_id = config['trainer']['hole_token_id']
+    return model, hole_prob, hole_token_id
 

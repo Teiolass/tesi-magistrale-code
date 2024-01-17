@@ -36,11 +36,11 @@ class Trainer_Config:
     test_split:        float
     weight_decay:      float
     eval_batch_size:   int
-    ccs_as_inputs:     bool
     save_directory:    str
     patience:          int
     max_patient_len:   int # @todo
     limit_num_batches: int | None = None
+
 
 def nice_print(txt: str):
     tqdm.write(txt)
@@ -140,21 +140,18 @@ class Training_Results:
 
 def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Config) -> Training_Results:
     def split(data):
-        ccs_codes = list(data['ccs_id']  .to_numpy())
-        if trainer_config.ccs_as_inputs:
-            input_codes = list(data['ccs_id'] .to_numpy())
-        else:
-            input_codes = list(data['icd9_id'] .to_numpy())
-        positions = list(data['position'].to_numpy())
-        counts    = list(data['count']   .to_numpy())
-        return ccs_codes, input_codes, counts, positions
+        out_codes   = list(data['out_id']  .to_numpy())
+        input_codes = list(data['icd9_id'] .to_numpy())
+        positions   = list(data['position'].to_numpy())
+        counts      = list(data['count']   .to_numpy())
+        return out_codes, input_codes, counts, positions
 
-    ccs_train, input_train, counts_train, positions_train = split(diagnoses.filter(pl.col('role') == 'train'))
-    ccs_eval,  input_eval,  counts_eval,  positions_eval  = split(diagnoses.filter(pl.col('role') == 'eval'))
-    ccs_test,  input_test,  counts_test,  positions_test  = split(diagnoses.filter(pl.col('role') == 'test'))
+    out_train, input_train, counts_train, positions_train = split(diagnoses.filter(pl.col('role') == 'train'))
+    out_eval,  input_eval,  counts_eval,  positions_eval  = split(diagnoses.filter(pl.col('role') == 'eval'))
+    out_test,  input_test,  counts_test,  positions_test  = split(diagnoses.filter(pl.col('role') == 'test'))
 
     # find the number of batches
-    num_batches = len(ccs_train) // trainer_config.batch_size
+    num_batches = len(out_train) // trainer_config.batch_size
     if trainer_config.limit_num_batches is not None:
         l_num_batches = min(num_batches, trainer_config.limit_num_batches)
         nice_print(
@@ -189,13 +186,13 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
                 batch_end   = batch_start + trainer_config.batch_size
 
                 # get the right data for the batch
-                i_ccs       = ccs_train       [batch_start: batch_end]
+                i_out       = out_train       [batch_start: batch_end]
                 i_input     = input_train     [batch_start: batch_end]
                 i_positions = positions_train [batch_start: batch_end]
                 i_counts    = counts_train    [batch_start: batch_end]
 
                 b_codes, b_positions, b_lengths, outputs = prepare_data (
-                    i_ccs, i_input, i_positions, trainer_config, model.config.device
+                    i_out, i_input, i_positions, trainer_config, model.config.device
                 )
 
                 # feed-forward + backpropagation
@@ -217,7 +214,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
             train_loss = total_train_loss / train_loss_divisor
             metrics_results = evaluate (
                 model,
-                ccs_eval,
+                out_eval,
                 input_eval,
                 positions_eval,
                 counts_eval,
@@ -253,7 +250,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
     model.load_state_dict(torch.load(model_save_path))
     metrics = evaluate (
         model,
-        ccs_test,
+        out_test,
         input_test,
         positions_test,
         counts_test,
@@ -273,7 +270,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
 
 def evaluate (
     model: nn.Module,
-    ccs_codes: list[np.ndarray],
+    out_codes: list[np.ndarray],
     icd_codes: list[np.ndarray],
     positions: list[np.ndarray],
     counts:    list[np.ndarray],
@@ -283,7 +280,7 @@ def evaluate (
 ):
     metrics_results_acc = Metrics_Results_Partial (0, 0, 0, 0, 0, 0)
 
-    num_batches = len(ccs_codes) // config.eval_batch_size
+    num_batches = len(out_codes) // config.eval_batch_size
     for _ in range(num_rounds):
         for batch_id in range(num_batches):
             batch_start = batch_id * config.eval_batch_size
@@ -291,12 +288,12 @@ def evaluate (
 
             # get the right data for the batch
             i_icd       = icd_codes [batch_start: batch_end]
-            i_ccs       = ccs_codes [batch_start: batch_end]
+            i_out       = out_codes [batch_start: batch_end]
             i_positions = positions [batch_start: batch_end]
             i_counts    = counts    [batch_start: batch_end]
 
             b_codes, b_positions, b_lengths, outputs = prepare_data (
-                i_ccs, i_icd, i_positions, trainer_config, model.config.device
+                i_out, i_icd, i_positions, trainer_config, model.config.device
             )
 
             mask = b_codes == config.hole_token_id
@@ -384,18 +381,18 @@ def compute_loss(predictions, targets, mask):
 
     return total_loss, masked_loss
 
-def prepare_data(b_ccs, b_input, b_positions, trainer_config: Trainer_Config, device):
+def prepare_data(b_out, b_input, b_positions, trainer_config: Trainer_Config, device):
     lengths = [len(x) for x in b_input]
     b_n     = max(lengths)
     b_input     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in b_input])
-    b_ccs       = np.array([np.pad(x.astype(int), (0, b_n - len(x)), constant_values=-1) for x in b_ccs])
+    b_out       = np.array([np.pad(x.astype(int), (0, b_n - len(x)), constant_values=-1) for x in b_out])
     b_positions = np.array([np.pad(x.astype(int), (0, b_n - len(x)), constant_values=-1) for x in b_positions])
 
 
     # tweak input with holes
     mask = np.random.rand(*b_input.shape) < trainer_config.hole_prob
     b_input[mask] = trainer_config.hole_token_id
-    b_ccs       = torch.from_numpy(b_ccs)
+    b_out       = torch.from_numpy(b_out)
     b_positions = torch.from_numpy(b_positions)
     b_input     = torch.from_numpy(b_input.astype(np.int64))
     b_lengths   = torch.LongTensor(lengths)
@@ -403,9 +400,9 @@ def prepare_data(b_ccs, b_input, b_positions, trainer_config: Trainer_Config, de
     b_positions = b_positions.to(device)
     b_input     = b_input    .to(device)
     b_lengths   = b_lengths  .to(device)
-    b_ccs       = b_ccs      .to(device)
+    b_out       = b_out      .to(device)
 
-    return b_input, b_positions, b_lengths, b_ccs
+    return b_input, b_positions, b_lengths, b_out
 
 DIR_ID_LENGTH = 5
 ALL_LETTERS   = 'abcdefghijklmnopqrstuvxywz'
@@ -425,9 +422,10 @@ if __name__ == '__main__':
 
     diagnoses = pl.read_parquet(config['diagnoses_path'])
 
-    config['model']['vocab_size']  = diagnoses['icd9_id'].list.max().max() + 1
-    config['model']['output_size'] = diagnoses['ccs_id'] .list.max().max() + 2 # this is for the hole code
+    config['model']['vocab_size']  = diagnoses['icd9_id'].list.max().max() + 2 # this is for the hole code
+    config['model']['output_size'] = diagnoses['out_id'] .list.max().max() + 1
     config['trainer']['hole_token_id'] = config['model']['vocab_size'] - 1
+    breakpoint()
     kelso_config = Kelso_Config(**config['model'])
     kelso_config.device = torch.device(kelso_config.device)
     model = Kelso_Filler(kelso_config)

@@ -9,11 +9,12 @@ pos_base    = 10_000
 dropout     = 0.7
 device      = 'cuda'
 mlp_intermediate_size = 1024
+parametrized_head = true
 
 [trainer]
 batch_size      = 32
 num_epochs      = 1000
-learning_rate   = 4e-4
+learning_rate   = 1e-4
 max_patient_len = 150
 eval_split      = 0.15
 test_split      = 0.15
@@ -22,7 +23,7 @@ eval_batch_size = 64
 ccs_as_inputs   = false
 patience        = 10
 save_directory  = 'results/kelso2-%(id)-%(date)/'
-# limit_num_batches = 3
+# limit_num_batches = 5
 
 [metrics]
 recalls = [5, 10, 20, 30]
