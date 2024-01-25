@@ -17,7 +17,7 @@ MODEL_FILE_NAME = 'model.torch'
 
 __all__ = [
     'Kelso_Filler', 'Kelso_Predictor', 'load_kelso_for_inference', 'prepare_batch_for_inference',
-    'Kelso_Config',
+    'Kelso_Config', 'load_kelso_for_generation', 'prepare_batch_for_generation'
 ]
 
 @dataclass(kw_only=True)
@@ -188,7 +188,7 @@ class Rotary_Embedding:
         self.base = base
 
         self.max_seq_len = 0
-        # @rubustness when we call the .to() method on the parent module, this should be moved to
+        # @rubustness when we call the .to() method on the parent module, this should be moved too
         self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, device=device).float() / self.dim))
 
     def increase_cache(self, seq_len: int):
@@ -431,8 +431,8 @@ def prepare_batch_for_generation (
     b_codes     = np.array([np.pad(x, (0, b_n - len(x)), constant_values=0 ) for x in codes])
     b_positions = np.array([np.pad(x, (0, b_n - len(x)), constant_values=-1) for x in positions])
 
-    mask = np.random.rand(*b_input.shape) < hole_prob
-    b_input[mask] = hole_token_id
+    mask = np.random.rand(*b_codes.shape) < hole_prob
+    b_codes[mask] = hole_token_id
 
     with torch.device(device):
         b_codes     = torch.from_numpy(b_codes)    .to(device)
@@ -468,14 +468,14 @@ def load_kelso_for_generation(path: str) -> Kelso_Filler:
 
     with open(config_path, 'r') as f:
         txt = f.read()
-    config = tomlkit.parse(txt)['model']
-    config = Kelso_Config(**config)
+    config = tomlkit.parse(txt)
+    hole_prob     = config['trainer']['hole_prob']
+    hole_token_id = config['trainer']['hole_token_id']
+    config = Kelso_Config(**config['model'])
 
     model = Kelso_Filler(config) 
     state_dict = torch.load(model_path)
     model.load_state_dict(state_dict)
 
-    hole_prob     = config['trainer']['hole_prob']
-    hole_token_id = config['trainer']['hole_token_id']
     return model, hole_prob, hole_token_id
 

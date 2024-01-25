@@ -12,7 +12,7 @@ mlp_intermediate_size = 1024
 parametrized_head = false # @hack to have uniform kelso config
 
 [trainer]
-hole_prob         = 0.05
+hole_prob         = 0.15
 num_test_rounds   = 30
 masked_loss_gamma = 100
 batch_size        = 32

@@ -1,7 +1,7 @@
 diagnoses_path = 'data/processed/diagnoses.parquet'
 
 [model]
-hidden_size = 256
+hidden_size = 128
 num_layers  = 5
 num_heads   = 4
 head_dim    = 32
@@ -23,7 +23,7 @@ eval_batch_size = 64
 ccs_as_inputs   = false
 patience        = 10
 save_directory  = 'results/kelso2-%(id)-%(date)/'
-# limit_num_batches = 5
+limit_num_batches = 493
 
 [metrics]
 recalls = [5, 10, 20, 30]

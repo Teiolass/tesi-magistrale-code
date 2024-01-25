@@ -52,6 +52,7 @@ class Epoch_Metrics:
     train_loss: float
     eval_loss: float
     eval_masked_loss: float
+    eval_mixed_loss: float
     eval_masked_accuracy: float
     eval_accuracy: float
 
@@ -62,7 +63,7 @@ def log_metrics(metrics: Epoch_Metrics, config: Trainer_Config):
     elems = [
         f'{metrics.epoch: >3}.',
         f'train_loss: {metrics.train_loss:.3f}',
-        f'eval_loss: {metrics.eval_loss:.3f}',
+        f'eval_loss: {metrics.eval_mixed_loss:.3f}',
         f'masked_loss: {metrics.eval_masked_loss:.3f}',
         f'accuracy: {metrics.eval_accuracy:.3f}',
         f'masked_accuracy: {metrics.eval_masked_accuracy:.3f}',
@@ -76,7 +77,7 @@ def log_metrics(metrics: Epoch_Metrics, config: Trainer_Config):
     if metrics.epoch == 0:
         if os.path.exists(csv_file_path):
             raise Error(f'We are in epoch zero, but csv file {csv_file_path} already exists')
-        txt  = 'epoch,learn_rate,train_loss,eval_loss,eval_masked_loss,accuracy,masked_accuracy'
+        txt  = 'epoch,learn_rate,train_loss,eval_loss,eval_masked_loss,eval_mixed_loss,accuracy,masked_accuracy'
         txt += '\n'
     else:
         txt = ''
@@ -87,6 +88,7 @@ def log_metrics(metrics: Epoch_Metrics, config: Trainer_Config):
         f'{metrics.train_loss:.6f}',
         f'{metrics.eval_loss:.6f}',
         f'{metrics.eval_masked_loss:.6f}',
+        f'{metrics.eval_mixed_loss:.6f}',
         f'{metrics.eval_accuracy:.6f}',
         f'{metrics.eval_masked_accuracy:.6f}',
     ]
@@ -195,6 +197,7 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
                     i_out, i_input, i_positions, trainer_config, model.config.device
                 )
 
+
                 # feed-forward + backpropagation
                 optimizer.zero_grad()
                 model.train()
@@ -226,9 +229,10 @@ def train(model: nn.Module, diagnoses: pl.DataFrame, trainer_config: Trainer_Con
                 learn_rate = float(optimizer.param_groups[0]['lr']),
                 train_loss = train_loss,
                 eval_loss  = metrics_results.loss,
-                eval_masked_loss = metrics_results.masked_loss,
+                eval_mixed_loss      = metrics_results.mixed_loss,
+                eval_masked_loss     = metrics_results.masked_loss,
                 eval_masked_accuracy = metrics_results.masked_accuracy,
-                eval_accuracy =  metrics_results.accuracy
+                eval_accuracy        = metrics_results.accuracy
             )
             log_metrics(metrics, trainer_config)
 
@@ -304,18 +308,21 @@ def evaluate (
                 predictions = model(b_codes, b_positions, b_lengths)
                 m = compute_metrics(predictions, outputs, mask)
             
-            metrics_results_acc.total_loss            = m.total_loss
-            metrics_results_acc.total_masked_loss     = m.total_masked_loss
-            metrics_results_acc.total_accuracy        = m.total_accuracy
-            metrics_results_acc.total_masked_accuracy = m.total_masked_accuracy
-            metrics_results_acc.divisor               = m.divisor
-            metrics_results_acc.masked_divisor        = m.masked_divisor
+            metrics_results_acc.total_loss            += m.total_loss
+            metrics_results_acc.total_masked_loss     += m.total_masked_loss
+            metrics_results_acc.total_accuracy        += m.total_accuracy
+            metrics_results_acc.total_masked_accuracy += m.total_masked_accuracy
+            metrics_results_acc.divisor               += m.divisor
+            metrics_results_acc.masked_divisor        += m.masked_divisor
 
     mra = metrics_results_acc
+    loss        = mra.total_loss        / mra.divisor
+    masked_loss = mra.total_masked_loss / mra.masked_divisor if mra.masked_divisor > 0 else 0.0
     return Metrics_Results (
-        loss            = mra.total_loss            / mra.divisor,
+        loss            = loss,
+        masked_loss     = masked_loss,
+        mixed_loss      = loss + config.masked_loss_gamma * masked_loss,
         accuracy        = mra.total_accuracy        / mra.divisor,
-        masked_loss     = mra.total_masked_loss     / mra.masked_divisor if mra.masked_divisor > 0 else 0.0,
         masked_accuracy = mra.total_masked_accuracy / mra.masked_divisor if mra.masked_divisor > 0 else 0.0,
     )
 
@@ -325,6 +332,7 @@ class Metrics_Results:
     masked_loss:     float
     accuracy:        float
     masked_accuracy: float
+    mixed_loss:      float
 
 @dataclass
 class Metrics_Results_Partial:
@@ -425,7 +433,6 @@ if __name__ == '__main__':
     config['model']['vocab_size']  = diagnoses['icd9_id'].list.max().max() + 2 # this is for the hole code
     config['model']['output_size'] = diagnoses['out_id'] .list.max().max() + 1
     config['trainer']['hole_token_id'] = config['model']['vocab_size'] - 1
-    breakpoint()
     kelso_config = Kelso_Config(**config['model'])
     kelso_config.device = torch.device(kelso_config.device)
     model = Kelso_Filler(kelso_config)

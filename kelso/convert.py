@@ -121,7 +121,7 @@ diagnoses = diagnoses.join(admissions, on='hadm_id', how='left').drop('hadm_id')
 
 # this is for the generation
 
-top_codes = diagnoses['icd9_id'].value_counts().sort('counts').head(num_output_codes)
+top_codes = diagnoses['icd9_id'].value_counts().sort('counts', descending=True).head(num_output_codes)
 top_codes = top_codes.filter(pl.col('icd9_id') != 0)
 top_codes = top_codes.select(
     pl.col('icd9_id'),
