@@ -403,10 +403,22 @@ def explain(config):
     return f1_score, correlation_matrices
 
 
+def format_float_to_precision(x: float, digits: int) -> str:
+    x = round(x, digits)
+    s = str(x)
+    n = digits - len(s.split('.')[1])
+    if n > 0:
+        s += '0' * n
+    return s
+
+
 if __name__ == '__main__':
     with open(config_path, 'r') as f:
         txt = f.read()
     all_config = tomlkit.parse(txt)
+
+    with open(output_path, 'a') as f:
+        f.write('\n====== New Run ======\n')
 
     for config in tqdm(all_config.values(), 'config', leave=False):
         f1_score, cms = explain(config)
@@ -415,14 +427,14 @@ if __name__ == '__main__':
         vals += [str(config['k_reals'])]
         vals += ['Yes' if config['ontological_perturbation'] else 'No ']
         vals += ['Yes' if config['generative_perturbation']  else 'No ']
-        vals += ['Yes' if config['uniform_perturbation']  else 'No ']
-        vals += [str(round(f1_score*100, 1)) + '%']
+        vals += ['Yes' if config['uniform_perturbation']     else 'No ']
+        vals += [format_float_to_precision(f1_score*100, 1) + '\\%']
 
         lines = []
         for k in cms.keys():
             mat = cms[k]
             cc = [mat[0, x] for x in range(1, 4)]
-            nvals = vals + [f'{k: <10}'] + [str(round(x, 2)) for x in cc]
+            nvals = vals + [f'{k: <10}'] + [format_float_to_precision(x, 2) for x in cc]
             txt = ' & '.join(nvals)
             txt += '  \\\\'
             print(txt)
