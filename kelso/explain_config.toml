@@ -1,6 +1,7 @@
 [a1]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+# filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 100
 batch_size       = 64
 keep_prob        = 0.8
@@ -17,7 +18,7 @@ generative_multiply_factor = 32
    
 [a2]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 100
 batch_size       = 64
 keep_prob        = 0.8
@@ -34,7 +35,7 @@ generative_multiply_factor = 32
   
 [a3]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 100
 batch_size       = 64
 keep_prob        = 0.8
@@ -51,7 +52,7 @@ generative_multiply_factor = 32
 
 [a4]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 100
 batch_size       = 64
 keep_prob        = 0.8
@@ -68,7 +69,7 @@ generative_multiply_factor = 8
 
 [a5]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 100
 batch_size       = 64
 keep_prob        = 0.8
@@ -87,7 +88,7 @@ generative_multiply_factor = 8
 
 [a6]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 200
 batch_size       = 64
 keep_prob        = 0.8
@@ -104,7 +105,7 @@ generative_multiply_factor = 16
 
 [a7]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 200
 batch_size       = 64
 keep_prob        = 0.8
@@ -121,7 +122,7 @@ generative_multiply_factor = 16
 
 [a8]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 200
 batch_size       = 64
 keep_prob        = 0.8
@@ -138,7 +139,7 @@ generative_multiply_factor = 16
 
 [a9]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 200
 batch_size       = 64
 keep_prob        = 0.8
@@ -155,8 +156,8 @@ generative_multiply_factor = 4
 
 [a10]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
-k_reals          = 800
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 200
 batch_size       = 64
 keep_prob        = 0.8
 num_references   = 500
@@ -171,12 +172,10 @@ synthetic_multiply_factor  = 4
 generative_multiply_factor = 4
 
 
-
-
 [a11]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
-k_reals          = 200
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 400
 batch_size       = 64
 keep_prob        = 0.8
 num_references   = 500
@@ -192,8 +191,8 @@ generative_multiply_factor = 4
 
 [a12]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
-k_reals          = 800
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 400
 batch_size       = 64
 keep_prob        = 0.8
 num_references   = 500
@@ -209,8 +208,8 @@ generative_multiply_factor = 4
 
 [a13]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
-k_reals          = 800
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 400
 batch_size       = 64
 keep_prob        = 0.8
 num_references   = 500
@@ -226,8 +225,8 @@ generative_multiply_factor = 4
 
 [a14]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
-k_reals          = 800
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 400
 batch_size       = 64
 keep_prob        = 0.8
 num_references   = 500
@@ -243,7 +242,92 @@ generative_multiply_factor = 2
 
 [a15]
 model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-filler_path      = 'results/filler-zsqpd-2024-01-24_13:53:27/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 400
+batch_size       = 64
+keep_prob        = 0.8
+num_references   = 500
+topk_predictions = 30
+ontological_perturbation   = true
+generative_perturbation    = true
+uniform_perturbation       = true
+filter_codes_present       = true
+tree_train_fraction        = 0.75
+num_top_important_features = 10
+synthetic_multiply_factor  = 2
+generative_multiply_factor = 2
+
+[a16]
+model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 800
+batch_size       = 64
+keep_prob        = 0.8
+num_references   = 500
+topk_predictions = 30
+ontological_perturbation   = true
+generative_perturbation    = false
+uniform_perturbation       = false
+filter_codes_present       = true
+tree_train_fraction        = 0.75
+num_top_important_features = 10
+synthetic_multiply_factor  = 4
+generative_multiply_factor = 4
+
+[a17]
+model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 800
+batch_size       = 64
+keep_prob        = 0.8
+num_references   = 500
+topk_predictions = 30
+ontological_perturbation   = false
+generative_perturbation    = true
+uniform_perturbation       = false
+filter_codes_present       = true
+tree_train_fraction        = 0.75
+num_top_important_features = 10
+synthetic_multiply_factor  = 4
+generative_multiply_factor = 4
+
+[a18]
+model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 800
+batch_size       = 64
+keep_prob        = 0.8
+num_references   = 500
+topk_predictions = 30
+ontological_perturbation   = false
+generative_perturbation    = true
+uniform_perturbation       = true
+filter_codes_present       = true
+tree_train_fraction        = 0.75
+num_top_important_features = 10
+synthetic_multiply_factor  = 4
+generative_multiply_factor = 4
+
+[a19]
+model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
+k_reals          = 800
+batch_size       = 64
+keep_prob        = 0.8
+num_references   = 500
+topk_predictions = 30
+ontological_perturbation   = true
+generative_perturbation    = true
+uniform_perturbation       = false
+filter_codes_present       = true
+tree_train_fraction        = 0.75
+num_top_important_features = 10
+synthetic_multiply_factor  = 2
+generative_multiply_factor = 2
+
+[a20]
+model_path       = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
+filler_path      = 'results/filler-gsofs-2024-01-21_13:20:37/'
 k_reals          = 800
 batch_size       = 64
 keep_prob        = 0.8

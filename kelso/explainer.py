@@ -22,22 +22,6 @@ ccs_path        = 'data/processed/ccs.parquet'
 config_path = 'repo/kelso/explain_config.toml'
 output_path = 'results/explainer.txt'
 
-# model_path      = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
-# filler_path     = 'results/filler-xyxdp-2024-01-21_15:16:51/'
-# k_reals          = 200
-# batch_size       = 64
-# keep_prob        = 0.8
-# num_references   = 500
-# topk_predictions = 30
-# ontological_perturbation   = False
-# generative_perturbation    = True
-# uniform_perturbation       = True
-# tree_train_fraction        = 0.75
-# num_top_important_features = 10
-# synthetic_multiply_factor  = 4
-# generative_multiply_factor = 16
-# filter_codes_present       = True
-
 def analyze_attention(attention: torch.Tensor, reference: int) -> dict[str, torch.Tensor]:
     attention_flat = attention.reshape((-1, attention.shape[-1]))
     attention_max_seq = attention_flat.max(0).values
@@ -66,67 +50,7 @@ def analyze_attention(attention: torch.Tensor, reference: int) -> dict[str, torc
     }
 
 
-def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
-    codes = pl.DataFrame({'icd9_id':ids})
-    codes = codes.join(ontology, how='left', on='icd9_id')
 
-    cursor = 0
-    for it in range(cnt.shape[0]):
-        length = cnt[it]
-        lines = []
-        for jt in range(cursor, cursor+length):
-            x = f'[{codes["icd_code"][jt]:}]' 
-            txt  = f'    {x: <10}'
-            txt += f'{codes["label"][jt]}'
-            lines.append(txt)
-        txt = '\n'.join(lines)
-        print(f'visit {it+1}')
-        print(txt)
-        cursor += length
-            
-def choose_ccs_to_explain(labels: np.ndarray, ccs_data: pl.DataFrame) -> int:
-    labels_with_description = pl.DataFrame({'ccs_id':labels}).join(ccs_data, how='left', on='ccs_id')
-    for it, row in enumerate(labels_with_description.iter_rows()):
-        selector = f'{it})'
-        code = row[1]
-        description = row[2]
-        code = f'[{code}]' 
-        line = f'{selector: >3} {code: <7} {description} - {row[0]}'
-        print(line)
-
-    index_to_explain = input('What do you want to explain? ')
-    index_to_explain = int(index_to_explain)
-    ccs_to_explain = labels[index_to_explain]
-    return ccs_to_explain
-
-def explain_label(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction):
-    # Tree fitting
-    tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
-
-    # @todo add appropriate args
-    tree_classifier = DecisionTreeClassifier()
-
-    train_split = int(tree_train_fraction * len(labels))
-
-    tree_inputs_train = tree_inputs[:train_split]
-    tree_inputs_eval  = tree_inputs[train_split:]
-    labels_train      = labels[:train_split]
-    labels_eval       = labels[train_split:]
-
-    tree_classifier.fit(tree_inputs_train, labels_train)
-    outputs = tree_classifier.predict(tree_inputs_eval)
-    # @todo
-    accuracy = metrics.accuracy_score(labels_eval, outputs)
-    f1_score = metrics.f1_score(labels_eval, outputs)
-
-    # Extract explanation
-
-    feature_importances = tree_classifier.feature_importances_
-    top_important_features = np.argpartition(- np.abs(feature_importances), range(num_top_important_features))
-    top_important_features = top_important_features[:num_top_important_features]
-    importances = feature_importances[top_important_features]
-
-    return top_important_features, importances, accuracy, f1_score
 
 def explain_all_labels(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction):
     # Tree fitting
@@ -306,6 +230,10 @@ def explain(config):
                     new_neigh_positions += neigh_positions[cursor:new_cursor]
 
                 cursor = new_cursor
+            neigh_icd       = new_neigh_icd
+            neigh_ccs       = new_neigh_ccs
+            neigh_counts    = new_neigh_counts
+            neigh_positions = new_neigh_positions
 
         # Choose result to explain
 
@@ -419,6 +347,8 @@ if __name__ == '__main__':
 
     with open(output_path, 'a') as f:
         f.write('\n====== New Run ======\n')
+        fil = all_config['a1']['filler_path']
+        f.write(f'== model: {fil}\n\n')
 
     for config in tqdm(all_config.values(), 'config', leave=False):
         f1_score, cms = explain(config)
@@ -437,7 +367,7 @@ if __name__ == '__main__':
             nvals = vals + [f'{k: <10}'] + [format_float_to_precision(x, 2) for x in cc]
             txt = ' & '.join(nvals)
             txt += '  \\\\'
-            print(txt)
+            tqdm.write(txt)
             lines.append(txt)
         lines = [x + '\n' for x in lines]
         lines = ''.join(lines)

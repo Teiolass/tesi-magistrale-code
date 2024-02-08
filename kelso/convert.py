@@ -77,6 +77,8 @@ diagnoses = (
     )
 ).unique()
 
+breakpoint()
+
 # convert ccs codes to ids
 ccs_codes = diagnoses[['ccs']].unique().sort('ccs')
 we_have_zero_code = 0 in ccs_codes['ccs'].head(1)
@@ -257,9 +259,10 @@ print(f'ontology path is:   {ontology_path}')
 print(f'generative path is: {generation_path}')
 print('')
 
-diagnoses .write_parquet(diagnoses_path)
-ccs_codes .write_parquet(ccs_path)
-icd9_codes.write_parquet(icd9_path)
-ontology  .write_parquet(ontology_path)
-generation_conversion.write_parquet(generation_path)
+# @debug
+# diagnoses .write_parquet(diagnoses_path)
+# ccs_codes .write_parquet(ccs_path)
+# icd9_codes.write_parquet(icd9_path)
+# ontology  .write_parquet(ontology_path)
+# generation_conversion.write_parquet(generation_path)
 
