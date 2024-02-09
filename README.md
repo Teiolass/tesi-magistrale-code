@@ -9,6 +9,8 @@ beginning of the python file or through `.toml` files.
 All the code is tested with Python 3.11. All the data outside the Mimic dataset (ontology and code
 conversions) are found in the `data/` folder. All the code is found in the `kelso/` folder.
 
+The output is always printed to stdout and to output files when specified in the configuration.
+
 ### Preprocessing
 Configuration is done in the `PARAMETERS` section of the file. To run, call `python convert.py`.
 
@@ -21,7 +23,8 @@ The predictor model is `Kelso_Predictor`, the generator model is `Kelso_Filler`.
 ### Predictor
 The predictor is trained through `python trainer.py`. All the configuration happen in the `.toml`
 file specified in the head of `trainer.py`. An example of configuration is `config.toml`.
-
+Results are available as text in standard output and in the log file (specified by `LOG_FILE_NAME`),
+and as a csv table in the file specified by (`CSV_FILE_NAME`).
 
 Hyperparameter selection on this model is done through `python hyper_selection.py`. Configs are
 taken from the `.toml` file specified in the header of `hyper_selection.py`. An example of
