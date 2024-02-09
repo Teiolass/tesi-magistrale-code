@@ -65,8 +65,9 @@ The files in the generator library are the following:
   The functions I export (except `create_c2c_table`) start with an underscore. Those functions
   convert the python arguments into `long int`, `float`, and C-style array values, and then call the
   version without initial underscore with the parsed arguments (for example `_ids_to_encoded` calls
-  the `ids_to_encoded` function). In particular, if a user wants to change a function without
-  changing its signature, the functions with underscore must be left untouched. 
+  the `ids_to_encoded` function). The logic of the functions are contained in their versions without
+  underscore. In particular, if a user wants to change a function without changing its signature,
+  the functions with underscore must be left untouched. 
 
   If arguments involve numpy ndarray's, there is a first conversion from Python Object to Numpy
   Array, and then a conversion from Numpy Array to C-style arrays.
