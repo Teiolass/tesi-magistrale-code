@@ -3,31 +3,43 @@ from polars import col
 
 import os
 
+#### PARAMETERS
+
 mimic_prefix  = 'data/mimic-iv/2.2/hosp/'
 ccs_prefix    = 'data/ccs'
 output_prefix = 'data/processed'
 
-diagnoses_file  = 'diagnoses_icd.csv.gz'
+# these are the mimic-iv tables
+diagnoses_file  = 'diagnoses_icd.csv.gz' 
 admissions_file = 'admissions.csv.gz'
-ccs_single_file = 'ccs_single_dx_tool_2015.csv'
+# this is to convert icd10 to icd8
 icd_conv_file   = 'icd10cmtoicd9gem.csv'
+# this is for converting icd9 to ccs
+ccs_single_file = 'ccs_single_dx_tool_2015.csv'
+# this contains the ontology over the icds
 ontology_file   = 'data/ICD9CM.csv'
 
+# these are the output files
 output_diagnoses  = 'diagnoses.parquet'
 output_ccs        = 'ccs.parquet'
 output_icd        = 'icd.parquet'
 output_ontology   = 'ontology.parquet'
 output_generation = 'generation.parquet'
 
-min_icd_occurences = 20
-num_output_codes = 500
+# minimum number of icd occurences to not be assigned a 0 code
+min_icd_occurences = 20 
+# this is for the generator model
+num_output_codes = 500 
 
 train_fraction = 0.7
 eval_fraction  = 0.15
 
+#### END PARAMETERS
+
 ontology_prefixes = ['http://purl.bioontology.org/ontology/ICD9CM/', 'http://purl.bioontology.org/ontology/STY/']
 ontology_root_name = 'root'
 
+# load all the data
 diagnoses_path = os.path.join(mimic_prefix, diagnoses_file)
 diagnoses      = pl.read_csv(diagnoses_path, dtypes={'subject_id':pl.UInt64, 'icd_version':pl.UInt8})
 admission_path = os.path.join(mimic_prefix, admissions_file)
@@ -44,7 +56,7 @@ diagnoses = diagnoses.with_columns (
 
 icd_conv = icd_conv.lazy().select (
     col('icd10cm'),
-    col('icd9cm').first().over('icd10cm') # @todo maybe we can have a better strategy
+    col('icd9cm').first().over('icd10cm')
 ).unique().collect()
 
 # convert icd10 to icd9
@@ -72,12 +84,10 @@ diagnoses = (
         how = 'left'
     )
     .with_columns (
-        ccs      = col('ccs'     ).fill_null(pl.lit(0)), # @todo this is a lazy way to deal with null values
+        ccs      = col('ccs'     ).fill_null(pl.lit(0)),
         icd_code = col('icd_code').fill_null(pl.lit('NoDx'))
     )
 ).unique()
-
-breakpoint()
 
 # convert ccs codes to ids
 ccs_codes = diagnoses[['ccs']].unique().sort('ccs')
@@ -121,8 +131,7 @@ admissions = admissions.select (
 diagnoses = diagnoses.join(admissions, on='hadm_id', how='left').drop('hadm_id')
 
 
-# this is for the generation
-
+# this is for the generative model
 top_codes = diagnoses['icd9_id'].value_counts().sort('counts', descending=True).head(num_output_codes)
 top_codes = top_codes.filter(pl.col('icd9_id') != 0)
 top_codes = top_codes.select(
@@ -243,7 +252,7 @@ ontology = pl.concat([
 dictionary = ontology.select(parent=pl.col('icd_code'), parent_id=pl.col('icd9_id'))
 ontology = ontology.join(dictionary, how='left', on='parent')
 
-# @@ Save
+# Save all the files
 
 diagnoses_path  = os.path.join(output_prefix, output_diagnoses)
 ccs_path        = os.path.join(output_prefix, output_ccs)
@@ -259,10 +268,9 @@ print(f'ontology path is:   {ontology_path}')
 print(f'generative path is: {generation_path}')
 print('')
 
-# @debug
-# diagnoses .write_parquet(diagnoses_path)
-# ccs_codes .write_parquet(ccs_path)
-# icd9_codes.write_parquet(icd9_path)
-# ontology  .write_parquet(ontology_path)
-# generation_conversion.write_parquet(generation_path)
+diagnoses .write_parquet(diagnoses_path)
+ccs_codes .write_parquet(ccs_path)
+icd9_codes.write_parquet(icd9_path)
+ontology  .write_parquet(ontology_path)
+generation_conversion.write_parquet(generation_path)
 

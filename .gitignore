@@ -1,7 +1,6 @@
 .ipynb_checkpoints/
 *.vim
 *.so
-python.zig
 test.*
 out.zig
 __pycache__/

@@ -27,7 +27,7 @@ model_path      = 'results/kelso2-dejlv-2024-01-20_17:23:33/'
 filler_path     = 'results/filler-xyxdp-2024-01-21_15:16:51/'
 k_reals          = 50
 batch_size       = 64
-keep_prob        = 0.8
+keep_prob        = 0.8 # for ontological perturbation
 topk_predictions = 10
 ontological_perturbation   = True
 generative_perturbation    = True
@@ -35,9 +35,8 @@ uniform_perturbation       = False
 tree_train_fraction        = 0.75
 synthetic_multiply_factor  = 4
 generative_multiply_factor = 4
-filter_codes_present       = True
 
-reference_index = 0
+reference_index = 0 # which patient of the dataset to explain
 
 def print_patient(ids: np.ndarray, cnt: np.ndarray, ontology: pl.DataFrame):
     codes = pl.DataFrame({'icd9_id':ids})
@@ -130,7 +129,6 @@ distance_list = gen.compute_patients_distances (
     counts_eval[reference_index],
     icd_codes_train,
     counts_train,
-    0, # this is unused for now
 )
 topk = np.argpartition(distance_list, k_reals-1)[:k_reals]
 
@@ -218,6 +216,8 @@ if generative_perturbation:
     neigh_positions += new_neigh_positions
 
 
+# Black Box Predictions on the reference
+
 batch = prepare_batch_for_inference(
     [icd_codes_eval[reference_index]],
     [counts_eval[reference_index]],
@@ -238,7 +238,7 @@ attention = attention.squeeze(0)
 attention_all = analyze_attention(attention, reference_index)
 attention_layers = [analyze_attention(attention[x], reference_index) for x in range(attention.shape[0])]
 
-# Black Box Predictions
+# Black Box Predictions on neighbours
 
 neigh_labels = np.empty((len(labels), len(neigh_icd), ), dtype=np.bool_)
 cursor = 0
@@ -262,6 +262,8 @@ while cursor < len(neigh_icd):
     cursor = new_cursor
 neigh_labels = neigh_labels.transpose()
 
+# explanation
+
 tree = explain_label (
     neigh_ccs, neigh_counts, neigh_labels, max_ccs_id, tree_train_fraction, list(range(topk_predictions))
 )
@@ -273,6 +275,8 @@ reference_enc = gen.ids_to_encoded(
     0.5
 )[0]
 
+
+# extract rules from explanation
 
 tree_path = tree.tree_.decision_path(reference_enc.reshape((1,-1))).indices
 features = tree.tree_.feature

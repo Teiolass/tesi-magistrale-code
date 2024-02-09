@@ -22,6 +22,31 @@ ccs_path        = 'data/processed/ccs.parquet'
 config_path = 'repo/kelso/explain_config.toml'
 output_path = 'results/explainer.txt'
 
+
+def explain_all_labels(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction):
+    # Tree fitting
+    tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
+
+    # @todo add appropriate args
+    tree_classifier = DecisionTreeClassifier()
+
+    train_split = int(tree_train_fraction * len(labels))
+
+    tree_inputs_train = tree_inputs[:train_split]
+    tree_inputs_eval  = tree_inputs[train_split:]
+    labels_train      = labels[:train_split]
+    labels_eval       = labels[train_split:]
+
+    tree_classifier.fit(tree_inputs_train, labels_train)
+    outputs = tree_classifier.predict(tree_inputs_eval)
+    # @todo
+    accuracy = metrics.accuracy_score(labels_eval.flatten(), outputs.flatten())
+    f1_score = metrics.f1_score(labels_eval, outputs, average='micro')
+
+    feature_importances = tree_classifier.feature_importances_
+
+    return feature_importances, accuracy, f1_score
+
 def analyze_attention(attention: torch.Tensor, reference: int) -> dict[str, torch.Tensor]:
     attention_flat = attention.reshape((-1, attention.shape[-1]))
     attention_max_seq = attention_flat.max(0).values
@@ -48,36 +73,6 @@ def analyze_attention(attention: torch.Tensor, reference: int) -> dict[str, torc
         'min': attention_min,
         'avg': attention_avg,
     }
-
-
-
-
-def explain_all_labels(neigh_ccs, neigh_counts, labels, max_ccs_id, tree_train_fraction):
-    # Tree fitting
-    tree_inputs = gen.ids_to_encoded(neigh_ccs, neigh_counts, max_ccs_id, 0.5)
-
-    # @todo add appropriate args
-    tree_classifier = DecisionTreeClassifier()
-
-    train_split = int(tree_train_fraction * len(labels))
-
-    tree_inputs_train = tree_inputs[:train_split]
-    tree_inputs_eval  = tree_inputs[train_split:]
-    labels_train      = labels[:train_split]
-    labels_eval       = labels[train_split:]
-
-    tree_classifier.fit(tree_inputs_train, labels_train)
-    outputs = tree_classifier.predict(tree_inputs_eval)
-    # @todo
-    accuracy = metrics.accuracy_score(labels_eval.flatten(), outputs.flatten())
-    f1_score = metrics.f1_score(labels_eval, outputs, average='micro')
-
-    # Extract explanation
-
-    feature_importances = tree_classifier.feature_importances_
-
-    # return top_important_features, importances, accuracy, f1_score
-    return feature_importances, accuracy, f1_score
 
 
 # Load base data and model
@@ -109,7 +104,6 @@ positions_eval = list(diagnoses_eval['position'].to_numpy())
 counts_eval    = list(diagnoses_eval['count'   ].to_numpy())
 
 def explain(config):
-
     model_path                 = config['model_path']
     filler_path                = config['filler_path']
     k_reals                    = config['k_reals']
@@ -153,7 +147,6 @@ def explain(config):
             counts_eval[reference],
             icd_codes_train,
             counts_train,
-            0, # this is unused for now
         )
         topk = np.argpartition(distance_list, k_reals-1)[:k_reals]
 
@@ -235,7 +228,7 @@ def explain(config):
             neigh_counts    = new_neigh_counts
             neigh_positions = new_neigh_positions
 
-        # Choose result to explain
+        #  prediction on the patient to be explained
 
         batch = prepare_batch_for_inference(
             [icd_codes_eval[reference]],
@@ -257,7 +250,7 @@ def explain(config):
         attention_all = analyze_attention(attention, reference)
         attention_layers = [analyze_attention(attention[x], reference) for x in range(attention.shape[0])]
 
-        # Black Box Predictions
+        # Black Box Predictions on the neighbours
 
         neigh_labels = np.empty((len(labels), len(neigh_icd), ), dtype=np.bool_)
         cursor = 0
@@ -288,45 +281,31 @@ def explain(config):
         total_accuracy += accuracy
         total_f1_score += f1_score
 
-        with np.errstate(invalid='raise'):
-            m = [importances] + [attention_all[x] for x in importance_analysis[1:]]
+
+        # computation of the corrcoef  of attention and tree FI
+        m = [importances] + [attention_all[x] for x in importance_analysis[1:]]
+        m = np.stack(m)
+        if filter_codes_present:
+            m = m[:, present_ccs]
+        if m.shape[1] == 1:
+            correlation_matrices['all'] += np.ones((4, 4))
+        else:
+            correlation_matrices['all'] += np.corrcoef(m)
+        for l in range(num_layers):
+            m = [importances] + [attention_layers[l][x] for x in importance_analysis[1:]]
             m = np.stack(m)
             if filter_codes_present:
                 m = m[:, present_ccs]
             if m.shape[1] == 1:
-                correlation_matrices['all'] += np.ones((4, 4))
+                correlation_matrices[f'layer_{l}'] += np.ones((4, 4))
             else:
-                try:
-                    correlation_matrices['all'] += np.corrcoef(m)
-                except:
-                    breakpoint()
-            for l in range(num_layers):
-                m = [importances] + [attention_layers[l][x] for x in importance_analysis[1:]]
-                m = np.stack(m)
-                if filter_codes_present:
-                    m = m[:, present_ccs]
-                if m.shape[1] == 0:
-                    breakpoint()
-                if m.shape[1] == 1:
-                    correlation_matrices[f'layer_{l}'] += np.ones((4, 4))
-                else:
-                    try:
-                        correlation_matrices[f'layer_{l}'] += np.corrcoef(m)
-                    except:
-                        breakpoint()
+                correlation_matrices[f'layer_{l}'] += np.corrcoef(m)
 
 
     accuracy = total_accuracy / num_references
     f1_score = total_f1_score / num_references
     for source in correlation_matrices:
         correlation_matrices[source] /= num_references
-
-    # print(f'avg accuracy: {accuracy*100:.4f}%')
-    # print(f'avg f1_score: {f1_score*100:.4f}%')
-    # for source in correlation_matrices:
-    #     print(source)
-    #     print(correlation_matrices[source])
-    #     print()
 
     return f1_score, correlation_matrices
 

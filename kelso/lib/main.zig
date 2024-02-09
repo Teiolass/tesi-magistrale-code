@@ -1,21 +1,30 @@
-// this is chosen looking at the input table_c2c
+// This is chosen looking at the input table_c2c.
+// Change this only if AoB errors occur (with the current ontology it doesnt)
 const genealogy_max_size: usize = 12;
+
+// number of parallel processes
 const num_jobs: usize = 16;
 
-var np: Np = undefined;
+// the numpy bindings
+var np: Np = undefined; 
 
+// Memory management
 var _arena: std.heap.ArenaAllocator = undefined;
 var global_arena: std.mem.Allocator = undefined;
 
+// Python object to report errors. Refer to pyhton documentation
 var generator_error: ?*py.PyObject = null;
 
 // This python module will export three functions
+// Refer to the C bindings documentation of python for the format
+// 
+// Functions referred to by this structure must be marked as `export` in their signature
 const module_methods = [_]py.PyMethodDef{
     .{
         .ml_name = "create_c2c_table",
         .ml_meth = create_c2c_table,
         .ml_flags = py.METH_VARARGS,
-        .ml_doc = "",
+        .ml_doc = "Precompute the code2code distances",
     },
     .{
         .ml_name = "compute_patients_distances",
@@ -27,44 +36,46 @@ const module_methods = [_]py.PyMethodDef{
         .ml_name = "ids_to_encoded",
         .ml_meth = _ids_to_encoded,
         .ml_flags = py.METH_VARARGS,
-        .ml_doc = "",
+        .ml_doc = "Perform the temporal encoding of doctorXAI",
     },
     .{
         .ml_name = "independent_perturbation",
         .ml_meth = _independent_perturbation,
         .ml_flags = py.METH_VARARGS,
-        .ml_doc = "",
+        .ml_doc = "Simple perturbation method. Unused",
     },
     .{
         .ml_name = "ontological_perturbation",
         .ml_meth = _ontological_perturbation,
         .ml_flags = py.METH_VARARGS,
-        .ml_doc = "",
+        .ml_doc = "Ontological perturbation of doctorXAI",
     },
     // this one is just a sentinel
+    // It is an array entry with all values set to zero
     std.mem.zeroes(py.PyMethodDef),
 };
 
+// precomputed table of code2code distances
 var table_c2c: Table_c2c = undefined;
+// Ontology
 var ontology: []u32 = undefined;
 
-/// inputs a patient (ids + count), a list of patients (list of ids + list of counts) and a neighborhood size
+/// inputs a patient (ids + count), a list of patients (list of ids + list of counts)
+/// returns an an array of distances of each element of the list with the input patient
+/// call this only after having filled the c2c table (called `create_c2c_table` from python)
 export fn _compute_patients_distances(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
     _ = self_obj;
     var arg1: ?*py.PyObject = undefined;
     var arg2: ?*py.PyObject = undefined;
     var arg3: ?*py.PyObject = undefined;
     var arg4: ?*py.PyObject = undefined;
-    var _num_neigh: i64 = undefined;
 
-    if (py.PyArg_ParseTuple(args, "OOOOl", &arg1, &arg2, &arg3, &arg4, &_num_neigh) == 0) return null;
+    if (py.PyArg_ParseTuple(args, "OOOO", &arg1, &arg2, &arg3, &arg4) == 0) return null;
 
     const patient_codes = arg1;
     const patient_count = arg2;
     const dataset_codes = arg3;
     const dataset_count = arg4;
-    const num_neigh: usize = @intCast(_num_neigh);
-    _ = num_neigh; // @todo this is unused
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -91,13 +102,11 @@ export fn _compute_patients_distances(self_obj: ?*py.PyObject, args: ?*py.PyObje
 
     compute_patients_distances(patient, dataset, table_c2c, result_data);
 
-    // @debug
-    // py.Py_INCREF(py.Py_None);
-    // return py.Py_None;
     return result_array;
 }
 
 /// This takes the list of patients to encode (ids and counts) and the max id, then returns their encoded form
+/// with temporal encoding
 export fn _ids_to_encoded(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
     _ = self_obj;
     var arg1: ?*py.PyObject = undefined;
@@ -189,7 +198,9 @@ const Table_c2c = struct {
     }
 };
 
+/// Precomputes the code2code distances
 export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.PyObject {
+    // Unwrap arguments to a plain array
     _ = self_obj;
     var arg1: ?*py.PyObject = undefined;
     var arg2: ?*py.PyObject = undefined;
@@ -229,8 +240,9 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         const _size: usize = @intCast(arr2.dimensions[0]); // @todo check nd
         break :blk t[0.._size];
     };
+    // end of unwrapping
+    //
     const max_leaf_index = std.mem.max(u32, leaf_indices) + 1;
-
     const max_id = blk: {
         var max: u32 = 0;
         for (0..size) |it| {
@@ -239,6 +251,7 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         break :blk max;
     };
 
+    // create and fill the ontology in a tree form
     var _ontology_tree = global_arena.alloc(u32, max_id + 1) catch return null;
     for (0..size) |it| {
         const child = tree[2 * it];
@@ -246,17 +259,20 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
         _ontology_tree[child] = parent;
     }
 
+    // create and fill c2c table
     table_c2c = std.mem.zeroes(Table_c2c);
     table_c2c.table = global_arena.alloc(f32, max_leaf_index * max_leaf_index) catch @panic("Alloc error");
     table_c2c.w = max_leaf_index;
     @memset(table_c2c.table, std.math.nan(f32));
 
+    // this if distinguishes between the single-threaded and the multi-threaded implementations
+    // the result on the two branches should be the same
     if (comptime num_jobs == 1) {
         for (leaf_indices, 0..) |it, it_index| {
             for (leaf_indices[0 .. it_index + 1]) |jt| {
                 const dist = compute_c2c(it, jt, _ontology_tree);
-                table_c2c.get_mut(it, jt).* = dist;
-                table_c2c.get_mut(jt, it).* = dist;
+                table_c2c.get_mut(it, jt).* = dist; // method in the Table_c2c struct
+                table_c2c.get_mut(jt, it).* = dist; // method in the Table_c2c struct
             }
         }
     } else {
@@ -317,10 +333,12 @@ export fn create_c2c_table(self_obj: ?*py.PyObject, args: ?*py.PyObject) ?*py.Py
 
     ontology = _ontology_tree;
 
+    // returns
     py.Py_INCREF(py.Py_None);
     return py.Py_None;
 }
 
+// Utility function to convert python datasets of patients in plain arrays
 fn parse_list_of_patients(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem.Allocator) ?[][][]u32 {
     if (py.PyList_Check(codes) == 0) {
         py.PyErr_SetString(generator_error, "Argument `codes` should be a list");
@@ -357,6 +375,7 @@ fn parse_list_of_patients(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator
     return dataset;
 }
 
+// Utility function to convert a patient from python object format to a plain array.
 fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem.Allocator) ?[][]u32 {
     const patient_id = blk: {
         const _patient_id = np.from_otf(codes, Np.Types.UINT, Np.Array_Flags.IN_ARRAY);
@@ -389,6 +408,7 @@ fn parse_patient(codes: ?*py.PyObject, counts: ?*py.PyObject, allocator: std.mem
     return patient;
 }
 
+// compute the distance of the two codes using the ontology
 fn compute_c2c(id_1: u32, id_2: u32, _ontology_tree: []u32) f32 {
     if (id_1 == id_2) return 0;
 
@@ -416,6 +436,7 @@ fn compute_c2c(id_1: u32, id_2: u32, _ontology_tree: []u32) f32 {
     return dist;
 }
 
+// utility function to follow the genealogy on the ontology tree
 fn get_genealogy(id: u32, _ontology_tree: []u32) struct { [genealogy_max_size]u32, usize } {
     var res = std.mem.zeroes([genealogy_max_size]u32);
     res[0] = id;
@@ -430,17 +451,13 @@ fn get_genealogy(id: u32, _ontology_tree: []u32) struct { [genealogy_max_size]u3
     return .{ res, it };
 }
 
+// compute the asymmetrical visit2visit distance
 fn asymmetrical_v2v(v1: []u32, v2: []u32, _table_c2c: Table_c2c) f32 {
     var sum: f32 = 0;
     for (v1) |c1| {
         var best = std.math.floatMax(f32);
         for (v2) |c2| {
             const dist = _table_c2c.get(c1, c2);
-            // const dist = blk: {
-            //     var x: f32 = 1.0;
-            //     if (c1 == c2) x = 0.0;
-            //     break :blk x;
-            // };
             best = @min(best, dist);
         }
         sum += best;
@@ -448,10 +465,10 @@ fn asymmetrical_v2v(v1: []u32, v2: []u32, _table_c2c: Table_c2c) f32 {
     return sum;
 }
 
+// compute the visit2visit distance
 fn compute_v2v(v1: []u32, v2: []u32, _table_c2c: Table_c2c) f32 {
     const x = asymmetrical_v2v(v1, v2, _table_c2c);
     const y = asymmetrical_v2v(v2, v1, _table_c2c);
-    // return x + y;
     return @max(x, y);
 }
 
@@ -556,6 +573,7 @@ fn compute_patients_distances(patient: [][]u32, dataset: [][][]u32, _table_c2c: 
     }
 }
 
+/// perform temporal encodings on the dataset
 fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, max_label: u32, lambda: f32) void {
     const data_size = dataset.len;
     const index = Indexer(2).init(.{ data_size, max_label });
@@ -575,6 +593,7 @@ fn ids_to_encoded(dataset: [][][]u32, encoded: [*]f32, max_label: u32, lambda: f
     }
 }
 
+// simple perturbation. Unused
 fn independent_perturbation(dataset: [][][]u32, multiply_factor: usize, keep_prob: f32) *py.PyObject {
     var ids_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
     var counts_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
@@ -605,6 +624,7 @@ fn independent_perturbation(dataset: [][][]u32, multiply_factor: usize, keep_pro
     return return_tuple;
 }
 
+// Ontological perturbation
 fn ontological_perturbation(dataset: [][][]u32, multiply_factor: usize, keep_prob: f32, _ontology: []u32) *py.PyObject {
     var ids_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
     var counts_list = py.PyList_New(@intCast(dataset.len * multiply_factor));
@@ -652,7 +672,6 @@ fn independent_perturb_patient(patient: [][]u32, keep_prob: f32, allocator: std.
             it.* = r < keep_prob;
             if (it.*) num_visit_taken += 1;
         }
-        // @todo @debug instead of taking an empty visit, we default to taking the first code
         if (num_visit_taken == 0) {
             num_visit_taken = 1;
             new_visit.*[0] = true;
@@ -754,6 +773,7 @@ fn ontological_perturb_patient(patient: [][]u32, keep_prob: f32, _ontology: []u3
     };
 }
 
+// Required for python bindings
 var generator_module = py.PyModuleDef{
     .m_base = .{
         .ob_base = .{ .ob_refcnt = 1, .ob_type = null },
@@ -771,6 +791,8 @@ var generator_module = py.PyModuleDef{
     .m_free = null,
 };
 
+// Required for python bindings, entry point of the module
+// Imports numpy too
 pub export fn PyInit_generator() ?*py.PyObject {
     const module = py.PyModule_Create(@constCast(&generator_module));
     if (module == null) return null;
